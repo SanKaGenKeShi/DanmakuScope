@@ -105,11 +105,9 @@ class StatisticalValidator:
                 method="wilson",
             )
         
-        # 计算 z 值
         alpha = 1 - confidence_level
         z = stats.norm.ppf(1 - alpha / 2)
         
-        # Wilson 置信区间公式
         p_hat = successes / total
         denominator = 1 + z**2 / total
         center = (p_hat + z**2 / (2 * total)) / denominator
@@ -208,7 +206,6 @@ class StatisticalValidator:
             "significance_test": None,
         }
         
-        # 如果启用显著性检验
         if self.enable_significance_testing:
             test_result = self.mann_whitney_u_test(group1_values, group2_values)
             if test_result:

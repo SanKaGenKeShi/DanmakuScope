@@ -22,8 +22,6 @@ from .utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# ========== LLM 输出 Schema（Pydantic 类型约束） ==========
-
 class EmotionOutput(BaseModel):
     """情感分析输出"""
     label: Literal["positive", "neutral", "negative"] = "neutral"
@@ -83,12 +81,12 @@ class LLMOutput:
 @dataclass
 class DualPathResult:
     """双路推理结果"""
-    output: LLMOutput  # 最终输出
-    consensus_level: ConsensusLevel  # 共识水平
-    jsd_score: float  # JSD 分数
-    weight_multiplier: float  # 权重乘数（低共识时为 0.2）
-    raw_outputs: List[Dict]  # 原始输出列表
-    prompt_version: str  # Prompt 版本
+    output: LLMOutput
+    consensus_level: ConsensusLevel
+    jsd_score: float
+    weight_multiplier: float  # 低共识时为 0.2
+    raw_outputs: List[Dict]
+    prompt_version: str
     
     def to_dict(self) -> dict:
         return {
@@ -105,39 +103,45 @@ class LLMClient:
     def __init__(self):
         llm_cfg = get_llm_settings()
         
-        # 初始化复杂任务客户端
         self.complex_client = AsyncOpenAI(
             base_url=llm_cfg.COMPLEX_LLM_BASE_URL,
             api_key=llm_cfg.COMPLEX_LLM_API_KEY,
-            timeout=60.0,  # 60秒超时
+            timeout=60.0,
         )
         self.complex_model = llm_cfg.COMPLEX_LLM_MODEL
         self.complex_temperatures = llm_cfg.COMPLEX_LLM_TEMPERATURES
         
-        # 初始化简单任务客户端
         self.simple_client = AsyncOpenAI(
             base_url=llm_cfg.SIMPLE_LLM_BASE_URL,
             api_key=llm_cfg.SIMPLE_LLM_API_KEY,
-            timeout=60.0,  # 60秒超时
+            timeout=60.0,
         )
         self.simple_model = llm_cfg.SIMPLE_LLM_MODEL
         self.simple_temperature = llm_cfg.SIMPLE_LLM_TEMPERATURE
         
 
         
-        # JSD 阈值
         self.jsd_threshold_low = llm_cfg.JSD_THRESHOLD_LOW
         self.jsd_threshold_medium = llm_cfg.JSD_THRESHOLD_MEDIUM
         self.low_consensus_weight = llm_cfg.LOW_CONSENSUS_WEIGHT
         
-        # 是否启用双路
         self.enable_dual_path = llm_cfg.ENABLE_DUAL_PATH
+        self.enable_thinking = llm_cfg.ENABLE_THINKING
+        
+        # API Key 占位符检测：未配置 .env 时提前提示，避免运行时报 401 无从排查
+        for name, key in (
+            ("COMPLEX_LLM_API_KEY", llm_cfg.COMPLEX_LLM_API_KEY),
+            ("SIMPLE_LLM_API_KEY", llm_cfg.SIMPLE_LLM_API_KEY),
+        ):
+            if key in ("sk-xxx", "sk-yyy", ""):
+                logger.warning(f"{name} 未配置（当前为占位值），请在 .env 中设置真实 Key")
         
         logger.info(
             f"LLM 客户端初始化完成，"
             f"复杂模型: {self.complex_model}，"
             f"简单模型: {self.simple_model}，"
-            f"双路: {'开启' if self.enable_dual_path else '关闭'}"
+            f"双路: {'开启' if self.enable_dual_path else '关闭'}，"
+            f"思考模式: {'开启' if self.enable_thinking else '关闭'}"
         )
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
@@ -150,6 +154,7 @@ class LLMClient:
         temperature: float
     ) -> Dict[str, Any]:
         try:
+            extra_body = {"enable_thinking": self.enable_thinking} if not self.enable_thinking else None
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
@@ -158,17 +163,16 @@ class LLMClient:
                 ],
                 temperature=temperature,
                 response_format={"type": "json_object"},
+                **({"extra_body": extra_body} if extra_body is not None else {}),
             )
             
             content = response.choices[0].message.content
             
-            # 解析 JSON
             try:
                 result = json.loads(content)
                 return result
             except json.JSONDecodeError as e:
                 logger.warning(f"JSON 解析失败: {e}，尝试提取 JSON")
-                # 尝试从文本中提取 JSON
                 json_match = regex.search(r'\{(?:[^{}]|(?R))*\}', content)
                 if json_match:
                     return json.loads(json_match.group())
@@ -183,13 +187,15 @@ class LLMClient:
         self, 
         prompt_components: PromptComponents
     ) -> DualPathResult:
-        """双路推理（两个温度并行）+ JSD 共识判定"""
-        logger.info("开始复杂任务分析（双路推理）")
+        """双路推理（两个温度并行）+ JSD 共识判定；ENABLE_DUAL_PATH 关闭时单路"""
+        logger.info("开始复杂任务分析（双路推理）" if self.enable_dual_path else "开始复杂任务分析（单路推理）")
         
         system_prompt = prompt_components.system_prompt
         user_prompt = prompt_components.user_prompt
         
-        # 双路推理（并行执行）
+        temperatures = self.complex_temperatures if self.enable_dual_path else self.complex_temperatures[:1]
+        
+        # 并行执行各路推理，失败返回 None（不再用默认值混入 JSD 计算）
         async def call_with_temp(temp):
             try:
                 return await self._call_llm(
@@ -201,20 +207,28 @@ class LLMClient:
                 )
             except Exception as e:
                 logger.error(f"复杂任务推理失败 (temp={temp}): {e}")
-                return self._default_output()
+                return None
         
-        # 并行执行两个温度的推理
-        results = await asyncio.gather(*[call_with_temp(temp) for temp in self.complex_temperatures])
-        outputs = list(results)
+        results = await asyncio.gather(*[call_with_temp(temp) for temp in temperatures])
+        outputs = [r for r in results if r is not None]
         
-        # 计算 JSD 和共识水平
+        if not outputs:
+            # 全部路径失败：保留默认输出并强制低共识（权重 0.2）
+            logger.warning("复杂任务全部推理路径失败，使用默认输出并标记为低共识")
+            return DualPathResult(
+                output=self._default_llm_output(),
+                consensus_level=ConsensusLevel.LOW,
+                jsd_score=1.0,
+                weight_multiplier=self.low_consensus_weight,
+                raw_outputs=list(results),
+                prompt_version=prompt_components.prompt_version,
+            )
+        
+        # 计算 JSD 和共识水平（仅基于成功路径）
         jsd_score = self._calculate_jsd(outputs)
         consensus_level = self._determine_consensus_level(jsd_score)
         
-        # 合并输出（取平均或选择高共识的）
         merged_output = self._merge_outputs(outputs, consensus_level)
-        
-        # 计算权重乘数
         weight_multiplier = self._calculate_weight_multiplier(consensus_level)
         
         result = DualPathResult(
@@ -249,7 +263,6 @@ class LLMClient:
                 self.simple_temperature
             )
             
-            # 提取句类判断
             sf_data = output.get("sentence_function", {})
             result = SentenceFunctionOutput.model_validate(sf_data)
             
@@ -266,7 +279,6 @@ class LLMClient:
         simple_prompt: PromptComponents
     ) -> DualPathResult:
         """复杂+简单并行，用简单路结果覆盖句类"""
-        # 并行执行复杂任务和简单任务
         complex_task = self.analyze_complex(complex_prompt)
         simple_task = self.analyze_simple(simple_prompt)
         
@@ -274,7 +286,6 @@ class LLMClient:
             complex_task, simple_task
         )
         
-        # 用简单任务的结果替换句类判断
         complex_result.output.sentence_function = sentence_function
         
         return complex_result
@@ -285,7 +296,6 @@ class LLMClient:
             return 0.0
         
         try:
-            # 提取情感标签的概率分布
             emotion_labels = ["positive", "neutral", "negative"]
             
             distributions = []
@@ -294,12 +304,10 @@ class LLMClient:
                 label = emotion.get("label", "neutral")
                 confidence = emotion.get("confidence", 0.5)
                 
-                # 构建概率分布
                 dist = np.zeros(len(emotion_labels))
                 if label in emotion_labels:
                     idx = emotion_labels.index(label)
                     dist[idx] = confidence
-                    # 剩余概率均匀分配
                     remaining = (1 - confidence) / (len(emotion_labels) - 1)
                     for i in range(len(emotion_labels)):
                         if i != idx:
@@ -309,16 +317,14 @@ class LLMClient:
                 
                 distributions.append(dist)
             
-            # 计算 JSD（添加 epsilon 平滑避免零概率除零）
+            # epsilon 平滑避免零概率除零
             eps = 1e-10
-            distributions = [d + eps for d in distributions]  # 平滑
-            # 重新归一化
+            distributions = [d + eps for d in distributions]
             distributions = [d / d.sum() for d in distributions]
             
             avg_dist = np.mean(distributions, axis=0)
             jsd = 0.0
             for dist in distributions:
-                # KL 散度
                 kl = np.sum(dist * np.log(dist / avg_dist))
                 jsd += kl
             jsd /= len(distributions)
@@ -345,11 +351,9 @@ class LLMClient:
         if not outputs:
             return self._default_llm_output()
         
-        # 如果是高共识，取第一个输出
         if consensus_level == ConsensusLevel.HIGH:
             return self._dict_to_llm_output(outputs[0])
         
-        # 否则，取置信度最高的输出
         best_output = max(outputs, key=lambda x: x.get("emotion", {}).get("confidence", 0))
         return self._dict_to_llm_output(best_output)
     
@@ -359,18 +363,7 @@ class LLMClient:
         else:
             return 1.0
     
-    def _default_output(self) -> Dict[str, Any]:
-        """默认输出（原始 dict，用于 JSD 计算等内部流程）"""
-        return {
-            "emotion": {"label": "neutral", "confidence": 0.5},
-            "cooperative_principle": {"violated": False, "maxim": "quality"},
-            "interaction_type": {"label": "other", "confidence": 0.5},
-            "sentence_function": {"label": "fragment", "confidence": 0.5},
-            "orthography": {"status": "standard", "confidence": 0.5},
-        }
-    
     def _default_llm_output(self) -> LLMOutput:
-        """默认 LLM 输出（类型化）"""
         return LLMOutput(
             emotion=EmotionOutput(),
             cooperative_principle=CooperativePrincipleOutput(),

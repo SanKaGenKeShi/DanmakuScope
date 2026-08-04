@@ -1,6 +1,5 @@
 """
 LLM 分析报告生成器 - 基于聚合数据生成社会语言学语料分析报告
-从 llm_client.py 拆分而来，专责报告生成任务
 """
 
 import json
@@ -29,6 +28,7 @@ class AnalysisReportGenerator:
         )
         self.model = llm_cfg.effective_analysis_report_model
         self.temperature = llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE
+        self.enable_thinking = llm_cfg.ENABLE_THINKING
 
         logger.info(f"分析报告生成器初始化完成，模型: {self.model}")
 
@@ -38,31 +38,23 @@ class AnalysisReportGenerator:
         metadata: Dict[str, Any],
         prompt_version: str
     ) -> str:
-        """
-        生成社会语言学语料分析报告
-
-        Args:
-            aggregated_data: 聚合数据列表（字典格式）
-            metadata: 视频元数据（bvid, title, tname, tags等）
-            prompt_version: 提示词版本
-
-        Returns:
-            str: 生成的分析报告文本
-        """
         logger.info("开始生成社会语言学语料分析报告")
 
         system_prompt = self._build_system_prompt(metadata)
         user_prompt = self._build_user_prompt(aggregated_data, metadata)
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+            kwargs = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=self.temperature,
-            )
+                "temperature": self.temperature,
+            }
+            if not self.enable_thinking:
+                kwargs["extra_body"] = {"enable_thinking": False}
+            response = await self.client.chat.completions.create(**kwargs)
 
             report_content = response.choices[0].message.content
             logger.info("社会语言学语料分析报告生成完成")
@@ -71,8 +63,6 @@ class AnalysisReportGenerator:
         except Exception as e:
             logger.error(f"分析报告生成失败: {e}")
             return f"分析报告生成失败: {e}"
-
-    # ========== 私有方法 ==========
 
     def _build_system_prompt(self, metadata: Dict[str, Any]) -> str:
         """构建分析报告的系统提示词（加载规范文档）"""
@@ -92,7 +82,6 @@ class AnalysisReportGenerator:
 请严格按照上述规范的术语定义、报告结构、写作规范和质量检查清单生成报告。"""
 
     def _load_report_spec(self) -> str:
-        """加载报告规范文档"""
         spec_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "lexicon",
@@ -140,7 +129,6 @@ class AnalysisReportGenerator:
         aggregated_data: List[Dict[str, Any]],
         metadata: Dict[str, Any]
     ) -> str:
-        """构建分析报告的用户提示词"""
         data_summary = {
             "视频信息": {
                 "bvid": metadata.get("bvid", ""),

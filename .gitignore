@@ -109,7 +109,18 @@ data/logs/*.log
 
 # API keys and secrets (double protection)
 **/*secret*
-**/*key*
-**/*token*
+*_key.txt
+*_keys.*
+*_token.txt
+*_tokens.*
 !**/*example*
 !**/*template*
+
+# 用户凭证文件（B站登录 JSON 等，隐私数据禁止入库）
+*credential*.json
+*credentials*
+*cookie*.json
+*.cookie
+
+# 代码文件显式放行（防止被通配规则误杀）
+!danmaku_analyzer/utils/token_counter.py

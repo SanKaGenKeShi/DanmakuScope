@@ -6,6 +6,12 @@ import os
 import sys
 from typing import Optional
 from loguru import logger
+
+try:
+    from loguru import Logger
+except ImportError:  # 旧版 loguru 未导出 Logger 类
+    Logger = type(logger)
+
 from ..config import get_settings
 
 
@@ -15,21 +21,10 @@ def setup_logger(
     rotation: str = "10 MB",
     retention: str = "7 days"
 ) -> None:
-    """
-    设置日志配置
-    
-    Args:
-        log_file: 日志文件路径（可选）
-        level: 日志级别
-        rotation: 日志轮转大小
-        retention: 日志保留时间
-    """
     settings = get_settings()
     
-    # 移除默认处理器
     logger.remove()
     
-    # 添加控制台处理器
     logger.add(
         sys.stdout,
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
@@ -37,7 +32,6 @@ def setup_logger(
         colorize=True,
     )
     
-    # 添加文件处理器
     if log_file is None:
         raw_log_dir = settings.LOG_DIR
         # 相对路径基于 DATA_ROOT 解析（用户可写目录）
@@ -55,18 +49,9 @@ def setup_logger(
     )
 
 
-def get_logger(name: str) -> logger.__class__:
-    """
-    获取日志记录器
-    
-    Args:
-        name: 日志记录器名称
-        
-    Returns:
-        logger: 日志记录器
-    """
+def get_logger(name: str) -> Logger:
+    """获取绑定模块名的日志记录器"""
     return logger.bind(name=name)
 
 
-# 初始化日志
 setup_logger()

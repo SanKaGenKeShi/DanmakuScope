@@ -31,34 +31,20 @@ from .report_generator import AnalysisReportGenerator
 from .cache_manager import CacheManager, get_cache_manager
 
 __all__ = [
-    # 版本
     "__version__",
-    # 配置
     "get_settings", "Settings",
-    # 爬虫
     "BilibiliCrawler", "VideoMeta", "DanmakuItem",
-    # 社会变量
     "SocialVariableExtractor", "SocialVariables",
-    # 去重
     "UserDeduplicator", "DeduplicationResult",
-    # 时序切分
     "TimelineSegmenter", "TimeSegment",
-    # 硬统计
     "HardMetricsAnalyzer", "HardMetricsResult",
-    # 微语境
     "ContextProvider", "ContextWindow",
-    # 统计验证
     "StatisticalValidator", "ConfidenceInterval", "DescriptiveStats",
-    # Prompt
     "PromptBuilder", "PromptComponents",
-    # LLM
     "LLMClient", "DualPathResult", "ConsensusLevel", "LLMOutput",
     "EmotionOutput", "CooperativePrincipleOutput", "InteractionTypeOutput",
     "SentenceFunctionOutput", "OrthographyOutput",
-    # 聚合
     "Aggregator", "AggregatedData", "DanmakuRecord",
-    # 报告
     "Reporter", "AnalysisReportGenerator",
-    # 缓存
     "CacheManager", "get_cache_manager",
 ]

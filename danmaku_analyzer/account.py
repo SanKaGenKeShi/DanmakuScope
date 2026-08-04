@@ -1,0 +1,163 @@
+"""
+账号模块 - B站二维码登录与凭证管理
+"""
+
+import asyncio
+import json
+import os
+import time
+from typing import Callable, Optional
+from urllib.parse import parse_qsl, urlparse
+
+import httpx
+
+from .config import get_settings
+from .utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+QR_GENERATE_API = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
+QR_POLL_API = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
+LOGIN_INFO_API = "https://api.bilibili.com/x/web-interface/nav"
+
+QR_POLL_INTERVAL = 2.0
+QR_LOGIN_TIMEOUT = 180.0
+QR_UNSCANNED = 86101
+QR_SCANNED = 86090
+QR_EXPIRED = 86038
+
+COOKIE_KEYS = ("SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5", "sid")
+
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.bilibili.com/",
+}
+
+
+class QrLoginError(Exception):
+    """二维码登录失败"""
+
+
+def default_credential_path() -> str:
+    return os.path.join(get_settings().DATA_ROOT, "credential.json")
+
+
+async def qr_login(
+    status_callback: Optional[Callable[[str, str], None]] = None,
+    timeout: float = QR_LOGIN_TIMEOUT,
+) -> dict:
+    """二维码登录：生成 → 轮询扫码 → 提取 Cookie，返回凭证字典"""
+    async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=10) as client:
+        resp = await client.get(QR_GENERATE_API)
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("code") != 0:
+            raise QrLoginError(payload.get("message") or "获取二维码失败")
+
+        data = payload.get("data") or {}
+        login_url = str(data.get("url") or "").strip()
+        qr_key = str(data.get("qrcode_key") or "").strip()
+        if not login_url or not qr_key:
+            raise QrLoginError("二维码接口返回数据不完整")
+
+        if status_callback:
+            status_callback("qr_ready", login_url)
+
+        deadline = time.monotonic() + timeout
+        scanned_notified = False
+        while True:
+            await asyncio.sleep(QR_POLL_INTERVAL)
+            if time.monotonic() > deadline:
+                raise QrLoginError("登录超时，请重新执行 login")
+
+            resp = await client.get(QR_POLL_API, params={"qrcode_key": qr_key})
+            resp.raise_for_status()
+            data = resp.json().get("data") or {}
+            code = int(data.get("code", -1))
+
+            if code == QR_UNSCANNED:
+                continue
+            if code == QR_SCANNED:
+                if not scanned_notified and status_callback:
+                    status_callback("scanned", "已扫码，请在手机上确认登录")
+                    scanned_notified = True
+                continue
+            if code == QR_EXPIRED:
+                raise QrLoginError("二维码已过期，请重新执行 login")
+            if code != 0:
+                continue
+
+            cookies = _extract_cookies(resp, data)
+            if not cookies.get("SESSDATA"):
+                raise QrLoginError("登录成功，但未能提取到 SESSDATA")
+            logger.info(f"二维码登录成功，DedeUserID: {cookies.get('DedeUserID', '未知')}")
+            return _to_credential(cookies)
+
+
+def _extract_cookies(resp: httpx.Response, data: dict) -> dict:
+    """优先从响应 Cookie 提取，回退到跳转 URL 的查询参数"""
+    items = {}
+    for name, value in resp.cookies.items():
+        if name in COOKIE_KEYS and value:
+            items[name] = value
+    if not items:
+        success_url = str(data.get("url") or "")
+        for name, value in parse_qsl(urlparse(success_url).query):
+            if name in COOKIE_KEYS and value:
+                items[name] = value
+    return items
+
+
+def _to_credential(cookies: dict) -> dict:
+    """Cookie 字段 → 凭证文件格式（与 pipeline._load_credential_file 兼容）"""
+    return {
+        "sessdata": cookies.get("SESSDATA", ""),
+        "bili_jct": cookies.get("bili_jct", ""),
+        "buvid3": "",
+        "dedeuserid": cookies.get("DedeUserID", ""),
+    }
+
+
+def save_credential(credential: dict, path: Optional[str] = None) -> str:
+    path = path or default_credential_path()
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(credential, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def load_credential(path: Optional[str] = None) -> Optional[dict]:
+    path = path or default_credential_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if data.get("sessdata"):
+            return data
+        logger.warning(f"凭证文件缺少 sessdata 字段: {path}")
+    except Exception as e:
+        logger.warning(f"凭证文件读取失败: {path} - {e}")
+    return None
+
+
+async def fetch_account_info(sessdata: str) -> dict:
+    """通过 nav 接口校验凭证有效性并返回账号信息"""
+    headers = dict(DEFAULT_HEADERS)
+    headers["Cookie"] = f"SESSDATA={sessdata}"
+    async with httpx.AsyncClient(headers=headers, timeout=10) as client:
+        resp = await client.get(LOGIN_INFO_API)
+        resp.raise_for_status()
+        payload = resp.json()
+    data = payload.get("data") or {}
+    if payload.get("code") == -101 or not data.get("isLogin"):
+        return {"is_login": False, "uname": "", "mid": ""}
+    return {
+        "is_login": True,
+        "uname": str(data.get("uname") or "").strip(),
+        "mid": str(data.get("mid") or ""),
+    }

@@ -8,7 +8,7 @@ import functools
 import os
 import zipfile
 from collections import Counter
-from typing import List, Optional, Callable, Any
+from typing import List, Optional, Callable
 from dataclasses import dataclass, field
 
 from .config import get_settings, Settings
@@ -24,7 +24,7 @@ from .aggregator import Aggregator, DanmakuRecord, AggregatedData
 from .reporter import Reporter
 from .statistical_validator import StatisticalValidator
 from .cache_manager import get_cache_manager
-from .utils.input_parser import parse_input, resolve_to_bvid, InputType
+from .utils.input_parser import InputParser, InputType
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,7 +32,6 @@ logger = get_logger(__name__)
 
 @dataclass
 class AnalysisResult:
-    """分析结果数据类"""
     bvid: str
     title: str
     tname: str
@@ -53,6 +52,7 @@ class PipelineContext:
     credential_file: Optional[str] = None
     freq_based: bool = False
     top_n: Optional[int] = None
+    no_cache: bool = False
     progress: Callable[[str, str], None] = field(default=lambda s, m: print(f"[{s}] {m}"))
 
     # 阶段 1 产出
@@ -92,7 +92,6 @@ ProgressCallback = Callable[[str, str], None]
 
 
 def _default_progress(stage: str, message: str):
-    """默认进度回调：打印到控制台"""
     print(f"[{stage}] {message}")
 
 
@@ -102,19 +101,19 @@ async def analyze_video(
     credential_file: Optional[str] = None,
     freq_based: bool = False,
     top_n: Optional[int] = None,
-    progress_callback: Optional[ProgressCallback] = None
+    progress_callback: Optional[ProgressCallback] = None,
+    no_cache: bool = False
 ) -> AnalysisResult:
-    """核心分析流程编排器"""
     settings = get_settings()
     progress = progress_callback or _default_progress
 
-    # 构建流水线上下文
     ctx = PipelineContext(
         input_str=input_str,
         output_dir=output_dir,
         credential_file=credential_file,
         freq_based=freq_based,
         top_n=top_n,
+        no_cache=no_cache,
         progress=progress,
         settings=settings,
         use_freq_based=freq_based or settings.ENABLE_FREQ_BASED_SAMPLING,
@@ -122,19 +121,11 @@ async def analyze_video(
         use_output_dir=_resolve_output_dir(output_dir, settings),
     )
 
-    # 阶段 1：输入解析
     await _stage_resolve_input(ctx)
-
-    # 阶段 2：数据爬取
     await _stage_crawl(ctx)
-
-    # 阶段 3：社会变量 + 去重 + 切分（CPU 密集，使用 executor）
     await _stage_preprocess(ctx)
-
-    # 阶段 4：弹幕分析（硬统计 + LLM）
     await _stage_analyze_segments(ctx)
 
-    # 空结果保护
     if not ctx.records:
         progress("弹幕分析", "警告：所有 LLM 分析均失败，无有效记录")
         return AnalysisResult(
@@ -143,10 +134,7 @@ async def analyze_video(
             aggregated_count=0, reports={}, zip_path=None, zip_valid=False
         )
 
-    # 阶段 5：聚合 + 统计验证
     await _stage_aggregate(ctx)
-
-    # 阶段 6：报告生成 + 打包
     await _stage_report(ctx)
 
     return AnalysisResult(
@@ -156,8 +144,6 @@ async def analyze_video(
         zip_path=ctx.zip_path if ctx.zip_valid else None, zip_valid=ctx.zip_valid
     )
 
-
-# ========== 阶段性私有方法 ==========
 
 def _resolve_output_dir(output_dir: Optional[str], settings: Settings) -> str:
     """解析输出目录：相对路径基于 DATA_ROOT（用户可写目录）"""
@@ -170,10 +156,11 @@ def _resolve_output_dir(output_dir: Optional[str], settings: Settings) -> str:
 async def _stage_resolve_input(ctx: PipelineContext):
     """阶段 1：解析输入，统一转为 BV 号"""
     ctx.progress("输入解析", f"正在解析: {ctx.input_str}")
-    parsed = parse_input(ctx.input_str)
+    parser = InputParser()
+    parsed = parser.parse(ctx.input_str)
     if parsed.input_type == InputType.UNKNOWN:
         raise ValueError(f"无法解析输入: {ctx.input_str}")
-    ctx.bvid = parsed.bvid if parsed.bvid else await resolve_to_bvid(ctx.input_str)
+    ctx.bvid = parsed.bvid if parsed.bvid else await parser.resolve_to_bvid(parsed)
     ctx.progress("输入解析", f"解析成功: {ctx.bvid}")
 
 
@@ -182,7 +169,18 @@ async def _stage_crawl(ctx: PipelineContext):
     settings = ctx.settings
     credential = None
     if ctx.credential_file:
-        pass  # TODO: 加载凭证文件
+        credential = await _load_credential_file(ctx.credential_file)
+        if credential:
+            ctx.progress("凭证加载", "已加载凭证文件")
+
+    # 未显式指定凭证文件时，回退到 login 命令保存的默认凭证（DATA_ROOT/credential.json）
+    if not credential:
+        from .account import default_credential_path
+        default_path = default_credential_path()
+        if os.path.exists(default_path):
+            credential = await _load_credential_file(default_path)
+            if credential:
+                ctx.progress("凭证加载", "已加载登录凭证（DATA_ROOT/credential.json）")
 
     logger.info(f"检查凭证: SESSDATA={'有' if settings.BILIBILI_SESSDATA else '无'}")
     if not credential and settings.BILIBILI_SESSDATA:
@@ -199,33 +197,53 @@ async def _stage_crawl(ctx: PipelineContext):
 
     cache = get_cache_manager()
     cache_key = f"crawl:{ctx.bvid}"
-    cached_data = cache.get(cache_key, max_age_hours=12)
+    cached_data = None if ctx.no_cache else cache.get(cache_key, max_age_hours=12)
 
     if cached_data:
         ctx.meta, ctx.danmaku_list = cached_data
         ctx.progress("数据获取", f"缓存命中: {ctx.meta.title} ({len(ctx.danmaku_list)} 条弹幕)")
     else:
+        if ctx.no_cache:
+            ctx.progress("数据获取", "已禁用缓存，强制重新爬取")
         ctx.meta, ctx.danmaku_list = await crawler.fetch_all(ctx.bvid)
-        cache.set(cache_key, (ctx.meta, ctx.danmaku_list))
+        # no_cache 或无凭证时跳过写入，避免不完整爬取结果污染缓存
+        if not ctx.no_cache and credential is not None:
+            cache.set(cache_key, (ctx.meta, ctx.danmaku_list))
         ctx.progress("数据获取", f"获取成功: {ctx.meta.title} ({len(ctx.danmaku_list)} 条弹幕)")
+
+
+async def _load_credential_file(path: str):
+    """从 JSON 凭证文件加载 Credential（字段：sessdata/bili_jct/buvid3）"""
+    from bilibili_api import Credential
+    try:
+        import json
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        sessdata = data.get("sessdata") or data.get("SESSDATA", "")
+        bili_jct = data.get("bili_jct") or data.get("BILIBILI_JCT", "")
+        buvid3 = data.get("buvid3") or data.get("BILIBILI_BUVID3", "")
+        if not sessdata:
+            logger.warning(f"凭证文件缺少 sessdata 字段: {path}")
+            return None
+        return Credential(sessdata=sessdata, bili_jct=bili_jct, buvid3=buvid3)
+    except Exception as e:
+        logger.error(f"凭证文件加载失败: {path} - {e}")
+        return None
 
 
 async def _stage_preprocess(ctx: PipelineContext):
     """阶段 3：社会变量提取 + 用户去重 + 时序切分（CPU 密集，使用 executor 避免阻塞事件循环）"""
     loop = asyncio.get_running_loop()
 
-    # 社会变量提取
     ctx.social_vars = SocialVariableExtractor().extract(ctx.meta)
     ctx.progress("社会变量", f"分区: {ctx.social_vars.tname}")
 
-    # 用户去重（CPU 密集）
     deduplicator = UserDeduplicator()
     ctx.dedup_result = await loop.run_in_executor(
         None, functools.partial(deduplicator.deduplicate, ctx.danmaku_list)
     )
     ctx.progress("用户去重", f"去重完成: {ctx.dedup_result.unique_real_user_count} 用户")
 
-    # 时序切分（CPU 密集）
     segmenter = TimelineSegmenter()
     ctx.segments = await loop.run_in_executor(
         None, functools.partial(segmenter.segment, ctx.dedup_result.deduplicated_danmaku)
@@ -234,7 +252,7 @@ async def _stage_preprocess(ctx: PipelineContext):
 
 
 async def _stage_analyze_segments(ctx: PipelineContext):
-    """阶段 4：对每个分段执行硬统计 + LLM 分析"""
+    """阶段 4：对每个分段执行硬统计 + LLM 分析（段间并行，全局信号量限速）"""
     settings = ctx.settings
     progress = ctx.progress
     social_vars = ctx.social_vars
@@ -250,9 +268,17 @@ async def _stage_analyze_segments(ctx: PipelineContext):
     llm_semaphore = asyncio.Semaphore(settings.LLM_CONCURRENCY)
     loop = asyncio.get_running_loop()
 
-    records: List[DanmakuRecord] = []
-    all_sample_danmaku = []
-    all_sample_segments = []
+    # 各段弹幕预计算，硬统计任务一次性全部提交（段间并行，CPU 密集走 executor）
+    segment_danmaku_lists = [
+        [dedup_result.deduplicated_danmaku[idx] for idx in seg.danmaku_indices]
+        for seg in segments
+    ]
+    hard_metrics_list = await asyncio.gather(*[
+        loop.run_in_executor(
+            None, functools.partial(hard_analyzer.analyze, [d.content for d in seg_dms])
+        )
+        for seg_dms in segment_danmaku_lists
+    ])
 
     async def _analyze_one(danmaku, segment, segment_danmaku, hard_metrics, segment_idx):
         async with llm_semaphore:
@@ -269,17 +295,13 @@ async def _stage_analyze_segments(ctx: PipelineContext):
                 llm_result=llm_result, segment_id=segment_idx,
             )
 
+    # 所有段的采样与 LLM 任务一次性提交，由信号量全局限速，避免段间串行空等
+    tasks = []
+    task_samples = []  # 与 tasks 一一对应：(样本弹幕, 所属段)
     for i, segment in enumerate(segments):
-        progress("弹幕分析", f"分析段 {i+1}/{len(segments)}...")
-        segment_danmaku = [dedup_result.deduplicated_danmaku[idx] for idx in segment.danmaku_indices]
+        segment_danmaku = segment_danmaku_lists[i]
+        hard_metrics = hard_metrics_list[i]
 
-        # 硬统计（CPU 密集，使用 executor）
-        contents = [d.content for d in segment_danmaku]
-        hard_metrics = await loop.run_in_executor(
-            None, functools.partial(hard_analyzer.analyze, contents)
-        )
-
-        # 采样策略
         if ctx.use_freq_based:
             content_counter = Counter(d.content for d in segment_danmaku)
             top_contents = content_counter.most_common(ctx.use_top_n)
@@ -291,18 +313,31 @@ async def _stage_analyze_segments(ctx: PipelineContext):
         else:
             sample_danmaku = segment_danmaku[:ctx.use_top_n]
 
-        # 并发 LLM 分析
-        tasks = [_analyze_one(d, segment, segment_danmaku, hard_metrics, i) for d in sample_danmaku]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for d in sample_danmaku:
+            tasks.append(_analyze_one(d, segment, segment_danmaku, hard_metrics, i))
+            task_samples.append((d, segment))
 
-        for result in results:
-            if isinstance(result, Exception):
-                logger.error(f"LLM 分析失败: {result}")
-            else:
-                records.append(result)
+    progress("弹幕分析", f"已提交 {len(tasks)} 条 LLM 分析任务（并发上限 {settings.LLM_CONCURRENCY}）")
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        all_sample_danmaku.extend(sample_danmaku)
-        all_sample_segments.extend([segment] * len(sample_danmaku))
+    # 同步过滤：仅登记成功结果对应的样本，保证 records 与样本一一对应（防止 kappa_ready 错位）
+    records: List[DanmakuRecord] = []
+    all_sample_danmaku = []
+    all_sample_segments = []
+    fail_count = 0
+    for result, (d, segment) in zip(results, task_samples):
+        if isinstance(result, Exception):
+            fail_count += 1
+            logger.error(f"LLM 分析失败: {result}")
+        else:
+            records.append(result)
+            all_sample_danmaku.append(d)
+            all_sample_segments.append(segment)
+
+    if fail_count:
+        progress("弹幕分析", f"分析完成: {len(records)} 成功，{fail_count} 失败")
+    else:
+        progress("弹幕分析", f"分析完成: {len(records)} 条全部成功")
 
     ctx.records = records
     ctx.all_sample_danmaku = all_sample_danmaku
@@ -318,7 +353,6 @@ async def _stage_aggregate(ctx: PipelineContext):
     ctx.aggregated = Aggregator().aggregate(ctx.records)
     progress("数据聚合", f"聚合完成: {len(ctx.aggregated)} 组")
 
-    # Wilson 置信区间
     progress("统计验证", "正在计算置信区间...")
     validator = StatisticalValidator()
     min_samples = settings.MIN_SEGMENT_SAMPLES
@@ -343,10 +377,9 @@ async def _stage_report(ctx: PipelineContext):
     progress("报告生成", "正在生成报告...")
     reporter = Reporter(output_dir=ctx.use_output_dir)
 
-    # 构建 kappa_ready 记录
+    # 构建 kappa_ready 记录（records 与样本已在阶段 4 同步过滤，一一对应）
     kappa_records = []
-    for i, (record, danmaku) in enumerate(zip(ctx.records, ctx.all_sample_danmaku)):
-        seg = ctx.all_sample_segments[i] if i < len(ctx.all_sample_segments) else ctx.segments[0]
+    for record, danmaku, seg in zip(ctx.records, ctx.all_sample_danmaku, ctx.all_sample_segments):
         kappa_records.append({
             "uid_hash": danmaku.uid_hash,
             "time_segment": f"{seg.start_time:.1f}-{seg.end_time:.1f}",
@@ -365,7 +398,6 @@ async def _stage_report(ctx: PipelineContext):
     ctx.reports = reporter.generate_reports(ctx.aggregated, kappa_records=kappa_records, metadata=video_metadata)
     progress("报告生成", "报告生成完成")
 
-    # LLM 分析报告（可选）
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
         progress("LLM报告", "正在生成社会语言学分析报告...")
         llm_report_path = await reporter.generate_llm_analysis_report(ctx.aggregated, metadata=video_metadata)
@@ -375,7 +407,6 @@ async def _stage_report(ctx: PipelineContext):
         else:
             progress("LLM报告", "LLM分析报告生成失败或未启用")
 
-    # ZIP 打包
     progress("报告打包", "正在打包报告...")
     safe_title = ctx.meta.title.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
     zip_filename = f"[{ctx.bvid}]{safe_title}.zip"
@@ -386,7 +417,6 @@ async def _stage_report(ctx: PipelineContext):
             if os.path.exists(path):
                 zipf.write(path, os.path.basename(path))
 
-    # 验证 + 清理源文件
     ctx.zip_valid = _validate_zip(zip_path, ctx.reports)
     ctx.zip_path = zip_path
     if ctx.zip_valid:

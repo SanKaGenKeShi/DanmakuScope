@@ -12,7 +12,6 @@ from .llm_config import get_llm_settings
 
 @dataclass
 class PromptComponents:
-    """提示词组件"""
     system_prompt: str
     user_prompt: str
     prompt_version: str
@@ -25,10 +24,8 @@ class PromptBuilder:
         self.prompt_version = get_llm_settings().PROMPT_VERSION
     
     def build_system_prompt(self, tname: str, tags: List[str]) -> str:
-        # 获取标签上下文（最多5个）
         tag_context = ", ".join(tags[:5]) if tags else "无特定标签"
         
-        # 获取语域提示
         register_hint = self.settings.REGISTER_HINTS.get(
             tname, 
             self.settings.DEFAULT_REGISTER_HINT
@@ -97,11 +94,9 @@ class PromptBuilder:
     ) -> str:
         parts = []
         
-        # 添加微语境
         if context_text:
             parts.append(f"【微语境】\n{context_text}\n")
         
-        # 添加待分析的弹幕
         parts.append(f"【待分析弹幕】\n{danmaku_content}")
         
         return "\n".join(parts)

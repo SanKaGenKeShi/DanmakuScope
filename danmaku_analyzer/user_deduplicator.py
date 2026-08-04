@@ -15,16 +15,14 @@ logger = get_logger(__name__)
 
 @dataclass
 class DeduplicationResult:
-    """去重结果"""
-    deduplicated_danmaku: List[DanmakuItem]  # 去重后的弹幕列表
-    total_count: int  # 总弹幕数（去重前）
-    unique_real_user_count: int  # 去重后的唯一真实用户数
-    unknown_device_count: int  # unknown_device 数量
-    duplicate_count: int  # 重复弹幕数量
+    deduplicated_danmaku: List[DanmakuItem]
+    total_count: int  # 去重前总弹幕数
+    unique_real_user_count: int
+    unknown_device_count: int
+    duplicate_count: int
     
     @property
     def deduplication_rate(self) -> float:
-        """去重率"""
         if self.total_count == 0:
             return 0.0
         return self.duplicate_count / self.total_count
@@ -44,7 +42,6 @@ class UserDeduplicator:
         
         logger.info(f"开始用户去重，共 {len(danmaku_list)} 条弹幕")
         
-        # 分离 real_user 和 unknown_device
         real_user_danmaku = []
         unknown_device_danmaku = []
         
@@ -54,28 +51,23 @@ class UserDeduplicator:
             else:
                 real_user_danmaku.append(danmaku)
         
-        # 对 real_user 进行去重（基于 uid_hash）
         user_danmaku_map: Dict[str, List[DanmakuItem]] = defaultdict(list)
         
         for danmaku in real_user_danmaku:
             user_danmaku_map[danmaku.uid_hash].append(danmaku)
         
-        # 每个用户只保留一条弹幕（保留第一条）
+        # 每个用户只保留第一条弹幕，其余计为重复
         deduplicated_real_user = []
         duplicate_count = 0
         
         for uid_hash, user_danmaku_list in user_danmaku_map.items():
             if len(user_danmaku_list) > 1:
-                # 保留第一条，其余视为重复
                 deduplicated_real_user.append(user_danmaku_list[0])
                 duplicate_count += len(user_danmaku_list) - 1
             else:
                 deduplicated_real_user.append(user_danmaku_list[0])
         
-        # 合并去重后的 real_user 和 unknown_device
         deduplicated_danmaku = deduplicated_real_user + unknown_device_danmaku
-        
-        # 按时间排序
         deduplicated_danmaku.sort(key=lambda x: x.time_sec)
         
         result = DeduplicationResult(

@@ -19,7 +19,6 @@ from .utils.logger import get_logger
 logger = get_logger(__name__)
 
 # B站 tid → 一级分区名称映射（当 API 返回 tname 为空时兜底）
-# 包含所有一级分区及其子分区 ID
 TID_TO_TNAME: dict[int, str] = {
     # 动画
     1: "动画", 24: "动画", 25: "动画", 47: "动画", 210: "动画", 86: "动画", 253: "动画",
@@ -112,7 +111,6 @@ class BilibiliCrawler:
             v = video.Video(bvid=bvid, credential=self.credential)
             info = await v.get_info()
             
-            # 提取标签
             tags = []
             try:
                 tag_info = await v.get_tags()
@@ -120,7 +118,6 @@ class BilibiliCrawler:
             except Exception as e:
                 logger.warning(f"获取标签失败: {e}")
             
-            # 提取分区名称：优先用 API 返回的 tname，为空则通过 tid 映射兜底
             tname = info.get("tname", "") or ""
             if not tname:
                 tid = info.get("tid", 0)
@@ -130,7 +127,6 @@ class BilibiliCrawler:
                 else:
                     logger.warning(f"tname 为空且 tid={tid} 无映射，分区未知")
             
-            # 构建元数据
             meta = VideoMeta(
                 bvid=bvid,
                 title=info.get("title", ""),
@@ -155,10 +151,8 @@ class BilibiliCrawler:
         try:
             v = video.Video(bvid=bvid, credential=self.credential)
             
-            # 获取弹幕列表（自动按 6 分钟分段拉取全部）
             raw_danmakus = await v.get_danmakus(cid=cid)
             
-            # 转换为内部数据模型
             danmaku_list = self._convert_danmakus(raw_danmakus)
             
             logger.info(f"弹幕获取成功，共 {len(danmaku_list)} 条")
@@ -166,7 +160,6 @@ class BilibiliCrawler:
             
         except Exception as e:
             logger.warning(f"protobuf 接口获取弹幕失败: {e}，回退到 XML 接口")
-            # 回退：使用旧 XML 接口（有数量上限，但作为兜底）
             return await self._fetch_danmaku_xml_fallback(bvid, cid)
     
     def _convert_danmakus(self, raw_danmakus) -> List[DanmakuItem]:
@@ -178,7 +171,7 @@ class BilibiliCrawler:
             crc32_id = getattr(dm, 'crc32_id', '') or ''
             uid = getattr(dm, 'uid', -1)
             
-            if crc32_id and crc32_id != '0' and crc32_id != '':
+            if crc32_id and crc32_id != '0':
                 uid_hash = crc32_id
                 identity_type = "real_user"
             elif uid and uid > 0:
@@ -229,7 +222,6 @@ class BilibiliCrawler:
             root = ET.fromstring(xml_content)
             
             for d_elem in root.findall(".//d"):
-                # 解析属性
                 attrs = d_elem.get("p", "").split(",")
                 if len(attrs) < 8:
                     continue
@@ -237,7 +229,6 @@ class BilibiliCrawler:
                 time_sec = float(attrs[0])
                 uid_str = attrs[6]  # 用户ID哈希
                 
-                # 处理UID
                 if uid_str == "0" or uid_str == "":
                     uid_hash = "unknown_device"
                     identity_type = "unknown_device"
@@ -268,7 +259,6 @@ class BilibiliCrawler:
             cid = info.get("cid", 0)
             
             if cid == 0:
-                # 尝试从分P信息获取
                 pages = info.get("pages", [])
                 if pages:
                     cid = pages[0].get("cid", 0)

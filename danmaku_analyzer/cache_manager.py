@@ -37,7 +37,6 @@ class CacheManager:
         if not os.path.exists(cache_path):
             return None
         
-        # 检查是否过期
         file_mtime = datetime.fromtimestamp(os.path.getmtime(cache_path))
         if datetime.now() - file_mtime > timedelta(hours=max_age_hours):
             logger.info(f"缓存已过期: {key}")
@@ -89,7 +88,6 @@ class CacheManager:
                 continue
             
             if max_age_hours is not None:
-                # 检查是否过期
                 file_mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
                 if datetime.now() - file_mtime <= timedelta(hours=max_age_hours):
                     continue
@@ -109,7 +107,6 @@ class CacheManager:
         if not os.path.exists(cache_path):
             return None
         
-        # 检查是否过期
         file_mtime = datetime.fromtimestamp(os.path.getmtime(cache_path))
         if datetime.now() - file_mtime > timedelta(hours=max_age_hours):
             logger.info(f"JSON 缓存已过期: {key}")
@@ -152,7 +149,6 @@ class CacheManager:
             return False
 
 
-# 全局缓存管理器实例
 _cache_manager: Optional[CacheManager] = None
 
 
@@ -165,6 +161,5 @@ def get_cache_manager() -> CacheManager:
 
 
 def clear_all_caches():
-    """清理所有缓存"""
     cache_manager = get_cache_manager()
     return cache_manager.clear()

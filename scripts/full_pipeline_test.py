@@ -21,23 +21,21 @@ logging.basicConfig(level=logging.WARNING)
 
 
 def print_progress(stage: str, message: str):
-    """打印进度"""
     print(f"  [{stage}] {message}")
 
 
 async def full_pipeline_test():
-    """全流程测试 - 使用 pipeline.py 核心逻辑"""
     settings = get_settings()
     
     print("="*60)
     print("DanmakuScope - 全流程测试")
     print("="*60)
     print(f"LLM配置:")
-    print(f"  复杂任务: {settings.COMPLEX_LLM_MODEL} @ {settings.COMPLEX_LLM_BASE_URL}")
-    print(f"  简单任务: {settings.SIMPLE_LLM_MODEL} @ {settings.SIMPLE_LLM_BASE_URL}")
+    print(f"  复杂任务: {settings.llm.COMPLEX_LLM_MODEL} @ {settings.llm.COMPLEX_LLM_BASE_URL}")
+    print(f"  简单任务: {settings.llm.SIMPLE_LLM_MODEL} @ {settings.llm.SIMPLE_LLM_BASE_URL}")
     print(f"分析策略: 频次最高的前 {settings.TOP_N} 条弹幕")
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
-        print(f"LLM分析报告: 已启用 (模型: {settings.effective_analysis_report_model})")
+        print(f"LLM分析报告: 已启用 (模型: {settings.llm.effective_analysis_report_model})")
     else:
         print(f"LLM分析报告: 未启用")
     print("="*60)
@@ -47,7 +45,7 @@ async def full_pipeline_test():
     try:
         result = await analyze_video(
             input_str=bvid,
-            freq_based=True,  # 使用频次排序
+            freq_based=True,
             progress_callback=print_progress
         )
         

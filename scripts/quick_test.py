@@ -21,7 +21,6 @@ async def test():
         print(f'播放量: {meta.view_count}')
         print(f'点赞: {meta.like_count}')
         
-        # 显示前5条弹幕
         print(f'\n前5条弹幕:')
         for i, d in enumerate(danmaku_list[:5]):
             print(f'  {i+1}. [{d.time_sec:.1f}s] {d.content}')

@@ -2,7 +2,7 @@
 
 B 站弹幕社会语言学分析命令行工具。采集弹幕及视频元数据，经硬统计与 LLM 软标签双通道分析后，按官方分区（tname）聚合输出交叉统计表，为社会语言学/语料库语言学实证研究提供可溯源、可复核的语料数据。
 
-当前版本：**v0.1.3-beta**
+当前版本：**v0.1.4-beta**
 
 ---
 
@@ -64,9 +64,18 @@ cp .env.example .env
 
 | 变量 | 说明 |
 |------|------|
-| `BILIBILI_SESSDATA` | B 站登录凭证，缺失时仅能获取极少量弹幕 |
 | `ENABLE_LLM_ANALYSIS_REPORT` | 启用 LLM 社会语言学分析报告生成 |
 | `DATA_ROOT` | 数据输出根目录，默认 `~/.danmaku-scope` |
+| `ENABLE_THINKING` | 启用 LLM 思考模式（默认关闭） |
+
+**B 站登录凭证**（推荐扫码登录，无需手动配置）：
+
+```bash
+danmaku-analyzer login      # 终端显示二维码，手机扫码后凭证自动保存
+danmaku-analyzer account    # 验证凭证有效性
+```
+
+凭证保存至 `DATA_ROOT/credential.json`，`analyze`/`batch` 自动加载（优先级：`--credential` 文件 → 登录凭证 → `.env` 中的 `BILIBILI_SESSDATA`）。无有效凭证时仅能获取极少量弹幕。
 
 ---
 
@@ -85,9 +94,16 @@ danmaku-analyzer batch BV1xx411c7mD BV1yy411c7mE
 # 频次排序采样（默认取每段前 N 条）
 danmaku-analyzer analyze BV1xx411c7mD --freq-based --top-n 15
 
+# 跳过缓存强制重新爬取
+danmaku-analyzer analyze BV1xx411c7mD --no-cache
+
 # 版本信息 / 当前配置
 danmaku-analyzer version
 danmaku-analyzer config
+
+# 扫码登录 / 凭证状态
+danmaku-analyzer login
+danmaku-analyzer account
 ```
 
 ---
@@ -120,6 +136,7 @@ danmaku_analyzer/
 ├── pipeline.py             # 流程编排（阶段式）
 ├── config.py               # 业务配置中心（pydantic-settings）
 ├── llm_config.py           # LLM 配置中心
+├── account.py              # B 站二维码登录与凭证管理
 ├── crawler.py              # B 站爬虫（protobuf + XML 兜底）
 ├── social_variables.py     # 社会变量锚定（tname 提取）
 ├── user_deduplicator.py    # 用户级去重
@@ -146,7 +163,7 @@ danmaku_analyzer/
 - **硬统计**：jieba（自定义词典）, regex, emoji
 - **语义分析**：openai SDK, tenacity, tiktoken
 - **统计**：scipy, numpy, ruptures
-- **爬虫**：bilibili-api-python, httpx
+- **爬虫**：bilibili-api-python, httpx, qrcode（扫码登录）
 - **数据处理**：pandas
 - **日志**：loguru
 - **测试**：pytest

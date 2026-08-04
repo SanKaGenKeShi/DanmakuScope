@@ -23,7 +23,6 @@ logger = get_logger(__name__)
 
 @dataclass
 class ReportMetadata:
-    """报告元数据"""
     generated_at: str
     prompt_version: str
     total_videos: int
@@ -37,7 +36,7 @@ class Reporter:
     
     def __init__(self, output_dir: Optional[str] = None):
         self.settings = get_settings()
-        self.output_dir = output_dir or self.settings.OUTPUT_DIR
+        self.output_dir = self.settings.resolve_data_path(output_dir or self.settings.OUTPUT_DIR)
         os.makedirs(self.output_dir, exist_ok=True)
     
     def generate_reports(
@@ -50,32 +49,17 @@ class Reporter:
         
         reports = {}
         
-        # 生成词类统计表
         reports["lexical_by_partition"] = self._generate_lexical_table(aggregated_data)
-        
-        # 生成正字法统计表
         reports["orthography"] = self._generate_orthography_table(aggregated_data)
-        
-        # 生成句类分布表
         reports["sentence_function"] = self._generate_sentence_function_table(aggregated_data)
-        
-        # 生成情感分布表
         reports["emotion"] = self._generate_emotion_table(aggregated_data)
-        
-        # 生成互动类型分布表
         reports["interaction_type"] = self._generate_interaction_type_table(aggregated_data)
-        
-        # 生成共识统计表
         reports["consensus_stats"] = self._generate_consensus_table(aggregated_data)
-        
-        # 生成热力图数据
         reports["heatmap_data"] = self._generate_heatmap_data(aggregated_data)
         
-        # 生成 kappa_ready.csv
         if kappa_records:
             reports["kappa_ready"] = self._generate_kappa_ready(kappa_records)
         
-        # 生成元数据
         reports["metadata"] = self._generate_metadata(aggregated_data, metadata)
         
         logger.info(f"报告生成完成，共 {len(reports)} 个文件")
@@ -95,10 +79,8 @@ class Reporter:
             
             logger.info("开始生成LLM分析报告")
             
-            # 初始化报告生成器
             report_gen = AnalysisReportGenerator()
             
-            # 准备元数据
             report_metadata = {
                 "bvid": metadata.get("bvid", "") if metadata else "",
                 "title": metadata.get("title", "") if metadata else "",
@@ -106,7 +88,6 @@ class Reporter:
                 "tags": metadata.get("tags", []) if metadata else [],
             }
             
-            # 将聚合数据转换为字典格式
             aggregated_dicts = []
             for data in aggregated_data:
                 aggregated_dicts.append({
@@ -131,14 +112,12 @@ class Reporter:
                     "orthography_hard_metrics": data.orthography_hard_metrics,
                 })
             
-            # 生成报告
             report_content = await report_gen.generate(
                 aggregated_data=aggregated_dicts,
                 metadata=report_metadata,
                 prompt_version=get_llm_settings().PROMPT_VERSION
             )
             
-            # 保存报告
             filepath = os.path.join(self.output_dir, "sociolinguistic_analysis_report.md")
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(report_content)
@@ -151,7 +130,6 @@ class Reporter:
             return None
     
     def _generate_lexical_table(self, data: List[AggregatedData]) -> str:
-        """生成词类统计表"""
         rows = []
         for item in data:
             row = {
@@ -162,10 +140,8 @@ class Reporter:
                 "content_word_density": item.content_word_density,
                 "punctuation_emoji_rate": item.punctuation_emoji_rate,
             }
-            # 添加词性分布
             for pos, ratio in item.pos_distribution.items():
                 row[f"pos_{pos}"] = ratio
-            # 添加音节分布
             for syllable_type, ratio in item.syllable_distribution.items():
                 row[f"syllable_{syllable_type}"] = ratio
             
@@ -179,7 +155,6 @@ class Reporter:
         return filepath
     
     def _generate_orthography_table(self, data: List[AggregatedData]) -> str:
-        """生成正字法统计表"""
         rows = []
         for item in data:
             row = {
@@ -187,10 +162,8 @@ class Reporter:
                 "zone_type": item.zone_type,
                 "danmaku_count": item.danmaku_count,
             }
-            # 硬指标
             for metric, value in item.orthography_hard_metrics.items():
                 row[f"hard_{metric}"] = value
-            # 软标签
             for status, ratio in item.orthography_status_distribution.items():
                 row[f"soft_{status}"] = ratio
             
@@ -204,7 +177,6 @@ class Reporter:
         return filepath
     
     def _generate_sentence_function_table(self, data: List[AggregatedData]) -> str:
-        """生成句类分布表"""
         rows = []
         for item in data:
             row = {
@@ -212,7 +184,6 @@ class Reporter:
                 "zone_type": item.zone_type,
                 "danmaku_count": item.danmaku_count,
             }
-            # 添加句类分布
             for sf, ratio in item.sentence_function_distribution.items():
                 row[sf] = ratio
             
@@ -226,7 +197,6 @@ class Reporter:
         return filepath
     
     def _generate_emotion_table(self, data: List[AggregatedData]) -> str:
-        """生成情感分布表"""
         rows = []
         for item in data:
             row = {
@@ -234,7 +204,6 @@ class Reporter:
                 "zone_type": item.zone_type,
                 "danmaku_count": item.danmaku_count,
             }
-            # 添加情感分布
             for emotion, ratio in item.emotion_distribution.items():
                 row[emotion] = ratio
             
@@ -248,7 +217,6 @@ class Reporter:
         return filepath
     
     def _generate_interaction_type_table(self, data: List[AggregatedData]) -> str:
-        """生成互动类型分布表"""
         rows = []
         for item in data:
             row = {
@@ -256,7 +224,6 @@ class Reporter:
                 "zone_type": item.zone_type,
                 "danmaku_count": item.danmaku_count,
             }
-            # 添加互动类型分布
             for it, ratio in item.interaction_type_distribution.items():
                 row[it] = ratio
             
@@ -270,7 +237,6 @@ class Reporter:
         return filepath
     
     def _generate_consensus_table(self, data: List[AggregatedData]) -> str:
-        """生成共识统计表"""
         rows = []
         for item in data:
             row = {
@@ -292,7 +258,6 @@ class Reporter:
         return filepath
     
     def _generate_heatmap_data(self, data: List[AggregatedData]) -> str:
-        """生成热力图数据"""
         heatmap_data = {
             "emotion_heatmap": {},
             "sentence_function_heatmap": {},
@@ -302,13 +267,8 @@ class Reporter:
         for item in data:
             key = f"{item.tname}_{item.zone_type}"
             
-            # 情感热力图
             heatmap_data["emotion_heatmap"][key] = item.emotion_distribution
-            
-            # 句类热力图
             heatmap_data["sentence_function_heatmap"][key] = item.sentence_function_distribution
-            
-            # 正字法热力图
             heatmap_data["orthography_heatmap"][key] = item.orthography_status_distribution
         
         filepath = os.path.join(self.output_dir, "heatmap_data.json")
@@ -319,17 +279,14 @@ class Reporter:
         return filepath
     
     def _generate_kappa_ready(self, records: List[Dict]) -> str:
-        """生成 kappa_ready.csv"""
         if not records:
             return ""
         
-        # 确定所有字段
         fieldnames = [
             "uid_hash", "time_segment", "raw_text", 
             "tname", "zone_type", "consensus_level", "weight_multiplier"
         ]
         
-        # 添加 LLM 输出字段
         llm_fields = [
             "emotion_label", "emotion_confidence",
             "cooperative_principle_violated", "cooperative_principle_maxim",
@@ -356,7 +313,6 @@ class Reporter:
                     "weight_multiplier": record.get("weight_multiplier", 1.0),
                 }
                 
-                # 提取 LLM 输出
                 llm_output = record.get("llm_output", {})
                 row["emotion_label"] = llm_output.get("emotion", {}).get("label", "")
                 row["emotion_confidence"] = llm_output.get("emotion", {}).get("confidence", 0)
@@ -379,7 +335,6 @@ class Reporter:
         data: List[AggregatedData],
         extra_metadata: Optional[Dict] = None
     ) -> str:
-        """生成元数据"""
         llm_cfg = get_llm_settings()
         metadata = {
             "generated_at": datetime.now().isoformat(),
