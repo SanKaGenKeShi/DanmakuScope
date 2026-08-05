@@ -19,6 +19,7 @@ logger = get_logger(__name__)
 QR_GENERATE_API = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
 QR_POLL_API = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
 LOGIN_INFO_API = "https://api.bilibili.com/x/web-interface/nav"
+BUVID_SPI_API = "https://api.bilibili.com/x/frontend/finger/spi"
 
 QR_POLL_INTERVAL = 2.0
 QR_LOGIN_TIMEOUT = 180.0
@@ -26,7 +27,7 @@ QR_UNSCANNED = 86101
 QR_SCANNED = 86090
 QR_EXPIRED = 86038
 
-COOKIE_KEYS = ("SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5", "sid")
+COOKIE_KEYS = ("SESSDATA", "bili_jct", "buvid3", "DedeUserID", "DedeUserID__ckMd5", "sid")
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -93,8 +94,25 @@ async def qr_login(
             cookies = _extract_cookies(resp, data)
             if not cookies.get("SESSDATA"):
                 raise QrLoginError("登录成功，但未能提取到 SESSDATA")
+            if not cookies.get("buvid3"):
+                # QR 登录响应通常不下发 buvid3 Cookie，通过指纹接口补全以保证凭证完整
+                cookies["buvid3"] = await _fetch_buvid3(client)
             logger.info(f"二维码登录成功，DedeUserID: {cookies.get('DedeUserID', '未知')}")
             return _to_credential(cookies)
+
+
+async def _fetch_buvid3(client: httpx.AsyncClient) -> str:
+    """通过指纹接口获取 buvid3，失败时返回空串（不阻断登录）"""
+    try:
+        resp = await client.get(BUVID_SPI_API)
+        resp.raise_for_status()
+        buvid3 = str((resp.json().get("data") or {}).get("b_3") or "")
+        if buvid3:
+            return buvid3
+        logger.warning("buvid3 指纹接口未返回 b_3 字段，凭证中 buvid3 为空")
+    except Exception as e:
+        logger.warning(f"buvid3 获取失败，凭证中 buvid3 为空: {e}")
+    return ""
 
 
 def _extract_cookies(resp: httpx.Response, data: dict) -> dict:
@@ -116,7 +134,7 @@ def _to_credential(cookies: dict) -> dict:
     return {
         "sessdata": cookies.get("SESSDATA", ""),
         "bili_jct": cookies.get("bili_jct", ""),
-        "buvid3": "",
+        "buvid3": cookies.get("buvid3", ""),
         "dedeuserid": cookies.get("DedeUserID", ""),
     }
 

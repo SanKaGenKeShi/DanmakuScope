@@ -9,7 +9,6 @@ from typing import List, Optional
 
 import click
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from .config import get_settings

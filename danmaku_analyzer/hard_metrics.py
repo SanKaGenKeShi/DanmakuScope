@@ -5,7 +5,6 @@
 """
 
 import os
-import re
 import json
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass

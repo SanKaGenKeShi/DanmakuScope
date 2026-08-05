@@ -118,41 +118,39 @@ class Aggregator:
         for record in records:
             all_tags.update(record.tags)
         
-        # 同一 segment 的多条记录共享同一 hard_metrics，需按 segment_id 去重
-        unique_segments = {}
-        for r in records:
-            if r.segment_id not in unique_segments:
-                unique_segments[r.segment_id] = r.hard_metrics
+        unique_metrics = self._unique_segment_metrics(records)
         
         aggregated = AggregatedData(
             tname=tname,
             zone_type=zone_type,
             tags=list(all_tags),
             video_count=1,  # 当前流水线每次运行处理单个视频
-            segment_count=len(unique_segments),
-            danmaku_count=sum(hm.total_danmaku_count for hm in unique_segments.values()),
+            segment_count=len(unique_metrics),
+            danmaku_count=sum(hm.total_danmaku_count for hm in unique_metrics),
         )
         
-        self._aggregate_hard_metrics(aggregated, records)
+        self._aggregate_hard_metrics(aggregated, unique_metrics)
         self._aggregate_soft_labels(aggregated, records)
         self._aggregate_consensus_stats(aggregated, records)
         
         return aggregated
     
-    def _aggregate_hard_metrics(
-        self, 
-        aggregated: AggregatedData, 
-        records: List[DanmakuRecord]
-    ):
-        """聚合硬统计（按 segment_id 去重，避免同段重复计数）"""
-        if not records:
-            return
-        
+    def _unique_segment_metrics(self, records: List[DanmakuRecord]) -> List[HardMetricsResult]:
+        """按 segment_id 去重段级硬统计，避免同段多条记录重复计数"""
         unique_segments = {}
         for r in records:
             if r.segment_id not in unique_segments:
                 unique_segments[r.segment_id] = r.hard_metrics
-        unique_metrics = list(unique_segments.values())
+        return list(unique_segments.values())
+    
+    def _aggregate_hard_metrics(
+        self, 
+        aggregated: AggregatedData, 
+        unique_metrics: List[HardMetricsResult]
+    ):
+        """聚合硬统计（输入已按 segment_id 去重）"""
+        if not unique_metrics:
+            return
         
         total_weight = sum(hm.total_danmaku_count for hm in unique_metrics)
         
@@ -210,10 +208,10 @@ class Aggregator:
         if not records:
             return
         
-        emotion_counter = defaultdict(int)
-        sentence_function_counter = defaultdict(int)
-        interaction_type_counter = defaultdict(int)
-        orthography_status_counter = defaultdict(int)
+        emotion_counter = defaultdict(float)
+        sentence_function_counter = defaultdict(float)
+        interaction_type_counter = defaultdict(float)
+        orthography_status_counter = defaultdict(float)
         
         total_weight = sum(r.llm_result.weight_multiplier for r in records)
         

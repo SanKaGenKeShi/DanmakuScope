@@ -7,29 +7,15 @@ import json
 import csv
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from dataclasses import dataclass
 
 import pandas as pd
 
 from .config import get_settings
 from .llm_config import get_llm_settings
 from .aggregator import AggregatedData
-from .llm_client import DualPathResult
-from .hard_metrics import HardMetricsResult
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-@dataclass
-class ReportMetadata:
-    generated_at: str
-    prompt_version: str
-    total_videos: int
-    total_danmaku: int
-    total_segments: int
-    partitions: List[str]
-    settings: Dict[str, Any]
 
 
 class Reporter:
@@ -117,6 +103,10 @@ class Reporter:
                 metadata=report_metadata,
                 prompt_version=get_llm_settings().PROMPT_VERSION
             )
+            
+            if not report_content:
+                logger.error("LLM分析报告生成失败: 未获得有效报告内容")
+                return None
             
             filepath = os.path.join(self.output_dir, "sociolinguistic_analysis_report.md")
             with open(filepath, 'w', encoding='utf-8') as f:

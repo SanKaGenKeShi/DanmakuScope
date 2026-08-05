@@ -4,7 +4,7 @@ LLM 分析报告生成器 - 基于聚合数据生成社会语言学语料分析�
 
 import json
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from openai import AsyncOpenAI
 
@@ -37,7 +37,7 @@ class AnalysisReportGenerator:
         aggregated_data: List[Dict[str, Any]],
         metadata: Dict[str, Any],
         prompt_version: str
-    ) -> str:
+    ) -> Optional[str]:
         logger.info("开始生成社会语言学语料分析报告")
 
         system_prompt = self._build_system_prompt(metadata)
@@ -57,12 +57,15 @@ class AnalysisReportGenerator:
             response = await self.client.chat.completions.create(**kwargs)
 
             report_content = response.choices[0].message.content
+            if not report_content:
+                logger.error("分析报告生成失败: 模型返回内容为空")
+                return None
             logger.info("社会语言学语料分析报告生成完成")
             return report_content
 
         except Exception as e:
             logger.error(f"分析报告生成失败: {e}")
-            return f"分析报告生成失败: {e}"
+            return None
 
     def _build_system_prompt(self, metadata: Dict[str, Any]) -> str:
         """构建分析报告的系统提示词（加载规范文档）"""

@@ -217,6 +217,7 @@ class BilibiliCrawler:
         import xml.etree.ElementTree as ET
         
         danmaku_list = []
+        skipped_count = 0
         
         try:
             root = ET.fromstring(xml_content)
@@ -224,6 +225,7 @@ class BilibiliCrawler:
             for d_elem in root.findall(".//d"):
                 attrs = d_elem.get("p", "").split(",")
                 if len(attrs) < 8:
+                    skipped_count += 1
                     continue
                 
                 time_sec = float(attrs[0])
@@ -249,6 +251,9 @@ class BilibiliCrawler:
         except Exception as e:
             logger.error(f"解析弹幕XML失败: {e}")
             raise
+        
+        if skipped_count:
+            logger.warning(f"XML 弹幕解析跳过 {skipped_count} 条属性不完整的记录（p 属性字段 < 8）")
         
         return danmaku_list
     

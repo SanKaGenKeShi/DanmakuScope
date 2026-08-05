@@ -172,7 +172,8 @@ class LLMClient:
                 result = json.loads(content)
                 return result
             except json.JSONDecodeError as e:
-                logger.warning(f"JSON 解析失败: {e}，尝试提取 JSON")
+                # 模型常用 markdown 包裹 JSON，首次直解必然失败走提取兜底，属预期路径
+                logger.debug(f"JSON 直解失败: {e}，尝试提取 JSON")
                 json_match = regex.search(r'\{(?:[^{}]|(?R))*\}', content)
                 if json_match:
                     return json.loads(json_match.group())
@@ -332,8 +333,9 @@ class LLMClient:
             return float(jsd)
             
         except Exception as e:
-            logger.warning(f"JSD 计算失败: {e}")
-            return 0.0
+            # 无法计算等同于不确定，按最大散度处理（LOW 共识、权重 0.2），遵循保守策略
+            logger.warning(f"JSD 计算失败，按最大散度处理: {e}")
+            return 1.0
     
     def _determine_consensus_level(self, jsd_score: float) -> ConsensusLevel:
         if jsd_score < self.jsd_threshold_low:
