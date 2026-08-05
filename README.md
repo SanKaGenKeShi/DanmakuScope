@@ -2,7 +2,7 @@
 
 B 站弹幕社会语言学分析命令行工具。采集弹幕及视频元数据，经硬统计与 LLM 软标签双通道分析后，按官方分区（tname）聚合输出交叉统计表，为社会语言学/语料库语言学实证研究提供可溯源、可复核的语料数据。
 
-当前版本：**v0.1.5-beta**
+当前版本：**v0.2.0-beta**
 
 ---
 
@@ -17,6 +17,7 @@ B 站弹幕社会语言学分析命令行工具。采集弹幕及视频元数据
 | 统计推断 | Wilson 置信区间 + 样本量校验，可选 Mann-Whitney U 探索性检验 |
 | 分析报告 | 可选调用 LLM 生成社会语言学语料分析报告 |
 | 产出打包 | 全部产出自动打包为 `[BV号]视频标题.zip` |
+| 语料库比较 | 跨视频语料库级聚合 + Kruskal-Wallis/Dunn 检验 + 分区缺口补足建议 + R/ggplot2 可视化脚本（v0.2.0-beta） |
 
 ---
 
@@ -104,6 +105,13 @@ danmaku-analyzer config
 # 扫码登录 / 凭证状态
 danmaku-analyzer login
 danmaku-analyzer account
+
+# 语料库级聚合（回读单视频 ZIP，可选 --from-index 从索引聚合 / --with-r 生成 R 脚本）
+danmaku-analyzer corpus "[BV1xx]标题.zip" "[BV1yy]标题.zip" --with-r
+
+# 语料库补足建议（分区缺口 + 在线候选视频；--gaps-only 仅离线缺口）
+danmaku-analyzer suggest 游戏 音乐 --per-partition 5
+danmaku-analyzer suggest --gaps-only
 ```
 
 ---
@@ -147,9 +155,13 @@ danmaku_analyzer/
 ├── llm_client.py           # 双路推理 + JSD 共识
 ├── report_generator.py     # LLM 分析报告生成器
 ├── aggregator.py           # 嵌套聚合（分区/热区）
-├── statistical_validator.py # Wilson CI + 样本量校验
+├── statistical_validator.py # 统计推断（Wilson CI + 语料库级 KW/Dunn/卡方检验）
 ├── reporter.py             # 报告导出 + ZIP 打包
 ├── cache_manager.py        # 缓存管理（Pickle, 12h TTL）
+├── corpus_store.py         # 语料库索引（corpus_index.json）
+├── corpus_builder.py       # 语料库级聚合（ZIP 回读 + 跨视频比较表）
+├── corpus_suggester.py     # 语料库补足建议（缺口分析 + 候选推荐）
+├── corpus_visualizer.py    # R/ggplot2 可视化脚本模板
 ├── utils/                  # 工具子包（日志/解析器/Token 计数）
 └── lexicon/                # 自定义词典 + 报告规范
 ```

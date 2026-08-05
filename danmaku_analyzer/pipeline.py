@@ -12,6 +12,7 @@ from typing import List, Optional, Callable
 from dataclasses import dataclass, field
 
 from .config import get_settings, Settings
+from . import __version__
 from .crawler import BilibiliCrawler, VideoMeta, DanmakuItem
 from .social_variables import SocialVariableExtractor, SocialVariables
 from .user_deduplicator import UserDeduplicator, DeduplicationResult
@@ -393,7 +394,11 @@ async def _stage_report(ctx: PipelineContext):
 
     video_metadata = {
         "bvid": ctx.bvid, "title": ctx.meta.title,
-        "tname": ctx.social_vars.tname, "tags": ctx.social_vars.tags
+        "tname": ctx.social_vars.tname, "tags": ctx.social_vars.tags,
+        "pubdate": ctx.meta.pubdate.isoformat(),
+        "view_count": ctx.meta.view_count,
+        "danmaku_count": len(ctx.danmaku_list),
+        "pipeline_version": __version__,
     }
     ctx.reports = reporter.generate_reports(ctx.aggregated, kappa_records=kappa_records, metadata=video_metadata)
     progress("报告生成", "报告生成完成")

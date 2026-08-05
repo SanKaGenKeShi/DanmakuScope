@@ -3,9 +3,15 @@ DanmakuScope - B站弹幕社会语言学分析工具
 """
 
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
+import re as _re
 
 try:
     __version__ = _pkg_version("danmaku-analyzer")
+    # importlib.metadata 会把预发布段规范化为 PEP 440 格式（如 0.2.0-beta → 0.2.0b0），还原为 pyproject.toml 原始写法
+    _m = _re.match(r'^(\d+\.\d+\.\d+)b(\d+)$', __version__)
+    if _m:
+        suffix = "beta" if _m.group(2) == "0" else f"beta{_m.group(2)}"
+        __version__ = f"{_m.group(1)}-{suffix}"
 except PackageNotFoundError:
     __version__ = "0.0.0-dev"  # 未安装时的回退值
 
@@ -29,6 +35,10 @@ from .aggregator import Aggregator, AggregatedData, DanmakuRecord
 from .reporter import Reporter
 from .report_generator import AnalysisReportGenerator
 from .cache_manager import CacheManager, get_cache_manager
+from .corpus_store import CorpusStore
+from .corpus_builder import CorpusBuilder
+from .corpus_suggester import CorpusSuggester
+from .corpus_visualizer import CorpusVisualizer
 
 __all__ = [
     "__version__",
@@ -47,4 +57,5 @@ __all__ = [
     "Aggregator", "AggregatedData", "DanmakuRecord",
     "Reporter", "AnalysisReportGenerator",
     "CacheManager", "get_cache_manager",
+    "CorpusStore", "CorpusBuilder", "CorpusSuggester", "CorpusVisualizer",
 ]

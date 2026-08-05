@@ -75,6 +75,7 @@ Thumbs.db
 
 danmaku_analyzer/Project_framework.md
 danmaku_analyzer/data/cache/*
+danmaku_analyzer/data/corpus_index.json
 danmaku_analyzer/data/logs/*.log
 danmaku_analyzer/data/raw/*
 danmaku_analyzer/data/reports/*

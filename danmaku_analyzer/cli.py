@@ -153,6 +153,96 @@ async def _batch_async(
 
 
 @cli.command()
+@click.argument('zip_list', nargs=-1)
+@click.option('--output', '-o', default=None, help='语料库聚合表输出目录')
+@click.option('--from-index', is_flag=True, default=False, help='从语料库索引登记的全部视频聚合（无需列出 ZIP）')
+@click.option('--with-r', is_flag=True, default=False, help='同时生成 R 可视化脚本模板（corpus_plots.R）')
+def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_r: bool):
+    """跨视频语料库级聚合（回读单视频 ZIP 报告，按分区输出比较表）"""
+    from .corpus_builder import CorpusBuilder
+
+    if not from_index and not zip_list:
+        console.print("[red]请提供至少一个 ZIP 文件，或使用 --from-index 从语料库索引聚合[/red]")
+        sys.exit(1)
+
+    try:
+        builder = CorpusBuilder()
+        if from_index:
+            path = builder.build_from_index(output)
+        else:
+            path = builder.build_from_zips(list(zip_list), output)
+        console.print(f"[bold green]语料库聚合完成[/bold green]")
+        console.print(f"  聚合表: {path}")
+        if with_r:
+            from .corpus_visualizer import CorpusVisualizer
+            r_path = CorpusVisualizer().write_r_script(os.path.dirname(path))
+            console.print(f"  R 可视化脚本: {r_path}")
+            console.print(f"  [dim]运行: Rscript {os.path.basename(r_path)}（需安装 R 与 ggplot2/dplyr/tidyr）[/dim]")
+    except Exception as e:
+        console.print(f"[red]语料库聚合失败: {e}[/red]")
+        logger.error(f"语料库聚合失败: {e}", exc_info=True)
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('partitions', nargs=-1)
+@click.option('--per-partition', default=10, help='每个分区的候选视频数（默认10）')
+@click.option('--gaps-only', is_flag=True, default=False, help='仅显示语料库缺口，不联网拉取候选')
+def suggest(partitions: tuple, per_partition: int, gaps_only: bool):
+    """语料库补足建议：各分区缺口 + 候选视频（BV号/标题/播放量/弹幕数/发布日期）"""
+    from .corpus_suggester import CorpusSuggester
+
+    try:
+        suggester = CorpusSuggester()
+        if gaps_only:
+            gaps = suggester.analyze_gaps()
+            candidates = {}
+        else:
+            result = asyncio.run(suggester.suggest(list(partitions) or None, per_partition))
+            gaps, candidates = result.gaps, result.candidates
+
+        _show_gaps(gaps)
+        if not gaps_only:
+            _show_candidates(candidates)
+    except Exception as e:
+        console.print(f"[red]建议生成失败: {e}[/red]")
+        logger.error(f"建议生成失败: {e}", exc_info=True)
+        sys.exit(1)
+
+
+def _show_gaps(gaps):
+    table = Table(title="语料库分区缺口")
+    table.add_column("分区", style="cyan")
+    table.add_column("已有视频数", justify="right")
+    table.add_column("最小要求", justify="right")
+    table.add_column("缺口", justify="right")
+    for g in gaps:
+        style = "green" if g.is_sufficient else "red"
+        table.add_row(g.tname, str(g.have), str(g.min_required), f"[{style}]{g.missing}[/{style}]")
+    if not gaps:
+        table.add_row("（语料库为空）", "0", "-", "-")
+    console.print(table)
+
+
+def _show_candidates(candidates):
+    for tname, videos in candidates.items():
+        console.print(f"\n[bold]分区「{tname}」候选视频（按弹幕数降序）[/bold]")
+        if not videos:
+            console.print("  [yellow]未获取到候选（搜索失败或无结果）[/yellow]")
+            continue
+        table = Table()
+        table.add_column("BV号", style="cyan")
+        table.add_column("标题", max_width=50, overflow="ellipsis")
+        table.add_column("播放量", justify="right")
+        table.add_column("弹幕数", justify="right")
+        table.add_column("发布日期")
+        for c in videos:
+            table.add_row(c.bvid, c.title, f"{c.play:,}", f"{c.danmaku_count:,}", c.pubdate)
+        console.print(table)
+        console.print(f"  [dim]挑选后可执行: danmaku-analyzer analyze <BV号>[/dim]")
+
+
+@cli.command()
 @click.option('--output', '-o', default=None, help='凭证保存路径（默认 DATA_ROOT/credential.json）')
 def login(output: Optional[str]):
     """扫码登录B站，自动获取并保存凭证"""

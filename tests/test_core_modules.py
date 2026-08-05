@@ -4,12 +4,14 @@
 """
 
 import pytest
+import json
 import numpy as np
 from unittest.mock import patch, MagicMock
 from dataclasses import dataclass
 
 from danmaku_analyzer.hard_metrics import HardMetricsAnalyzer, HardMetricsResult
 from danmaku_analyzer.aggregator import Aggregator, AggregatedData, DanmakuRecord
+from danmaku_analyzer.reporter import Reporter
 from danmaku_analyzer.timeline_segmenter import TimelineSegmenter, TimeSegment
 from danmaku_analyzer.crawler import DanmakuItem
 from danmaku_analyzer.llm_client import (
@@ -488,6 +490,44 @@ class TestIntegrationSmoke:
         agg_result = aggregator.aggregate([record])
         assert len(agg_result) == 1
         assert agg_result[0].danmaku_count == 3
+
+
+# ========== Reporter metadata 透传测试 ==========
+
+class TestReporterMetadata:
+    """metadata.json 字段透传测试（为语料库回读提供视频身份字段）"""
+
+    def test_extra_fields_written_to_metadata_json(self, tmp_path):
+        """pipeline 传入的 pubdate/view_count/danmaku_count/pipeline_version 原样写入"""
+        reporter = Reporter(output_dir=str(tmp_path))
+        aggregated = Aggregator().aggregate([make_danmaku_record()])
+        extra = {
+            "bvid": "BV1test000001",
+            "title": "测试视频",
+            "tname": "游戏",
+            "tags": ["TAG1"],
+            "pubdate": "2025-08-05T12:00:00",
+            "view_count": 12345,
+            "danmaku_count": 40,
+            "pipeline_version": "0.2.0-beta",
+        }
+        filepath = reporter._generate_metadata(aggregated, extra)
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        for key, value in extra.items():
+            assert data[key] == value, f"字段 {key} 未正确透传"
+
+    def test_internal_fields_still_present(self, tmp_path):
+        """内部生成字段（prompt_version/generated_at/汇总统计）不受透传影响"""
+        reporter = Reporter(output_dir=str(tmp_path))
+        aggregated = Aggregator().aggregate([make_danmaku_record()])
+        filepath = reporter._generate_metadata(aggregated, {"bvid": "BV1x"})
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        assert "prompt_version" in data
+        assert "generated_at" in data
+        assert data["total_videos"] == 1
+        assert data["partitions"] == ["游戏"]
 
 
 if __name__ == "__main__":

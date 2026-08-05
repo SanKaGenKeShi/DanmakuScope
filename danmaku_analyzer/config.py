@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     ENABLE_SIGNIFICANCE_TESTING: bool = Field(default=False, description="是否启用显著性检验，默认关闭，仅探索")
     SIGNIFICANCE_ALPHA: float = Field(default=0.05, description="显著性检验的 alpha 水平")
 
+    CORPUS_MIN_VIDEOS_PER_PARTITION: int = Field(default=3, description="语料库比较时每分区最少视频数，少于此不参与比较")
+    CORPUS_ZONE_POLICY: Literal["hot_only", "all", "weighted"] = Field(default="hot_only", description="语料库聚合冷热区策略：hot_only 仅热区 / all 两区各保留 / weighted 按弹幕数加权合并")
+    ENABLE_TEMPORAL_GROUPING: bool = Field(default=False, description="语料库聚合时是否按发布时间分桶（历时维度）")
+    TEMPORAL_GRANULARITY: Literal["year", "quarter", "month"] = Field(default="year", description="时间分桶粒度")
+
     SEGMENTATION_MODE: Literal["fixed", "dynamic"] = Field(default="dynamic", description="切分模式：fixed 或 dynamic")
     DYNAMIC_SEGMENT_METHOD: Literal["density"] = Field(default="density", description="动态切分方法：density")
     MIN_SEGMENT_SAMPLES: int = Field(default=30, description="每个动态分段最少弹幕数")
