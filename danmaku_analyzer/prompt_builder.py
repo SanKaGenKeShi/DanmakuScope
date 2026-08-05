@@ -17,6 +17,17 @@ class PromptComponents:
     prompt_version: str
 
 
+# 句类定义单一数据源：复杂任务系统提示词与简单任务提示词共用，变更只需改一处
+SENTENCE_FUNCTION_TYPES = (
+    ("assertion", "陈述句（陈述事实或观点）"),
+    ("question", "疑问句（提出问题）"),
+    ("exclamation", "感叹句（表达强烈情感）"),
+    ("directive", "祈使句（发出指令或请求）"),
+    ("fragment", "省略/片段（不完整的句子）"),
+)
+SENTENCE_FUNCTION_LABELS = " | ".join(label for label, _ in SENTENCE_FUNCTION_TYPES)
+
+
 class PromptBuilder:
     
     def __init__(self):
@@ -30,6 +41,8 @@ class PromptBuilder:
             tname, 
             self.settings.DEFAULT_REGISTER_HINT
         )
+        
+        sf_lines = "\n".join(f"   - {label}: {desc}" for label, desc in SENTENCE_FUNCTION_TYPES)
         
         system_prompt = f"""你是一位严谨的社会语言学家。当前分析的弹幕语料出自B站【{tname}】分区。
 该分区典型的语言风格特征为：{register_hint}。
@@ -52,8 +65,8 @@ class PromptBuilder:
 {{
     "emotion": {{"label": "positive | neutral | negative", "confidence": 0.95}},
     "cooperative_principle": {{"violated": false, "maxim": "quality | quantity | relation | manner"}},
-    "interaction_type": {{"label": "check_in | identity_claim | mocking | info_request | expression | other"}},
-    "sentence_function": {{"label": "assertion | question | exclamation | directive | fragment", "confidence": 0.92}},
+    "interaction_type": {{"label": "check_in | identity_claim | mocking | info_request | expression | other", "confidence": 0.88}},
+    "sentence_function": {{"label": "{SENTENCE_FUNCTION_LABELS}", "confidence": 0.92}},
     "orthography": {{
         "status": "standard | community_variant | non_standard_typo",
         "confidence": 0.98
@@ -74,11 +87,7 @@ class PromptBuilder:
    - expression: 情感表达
    - other: 其他
 4. sentence_function（言语行为/句类）：
-   - assertion: 陈述句
-   - question: 疑问句
-   - exclamation: 感叹句
-   - directive: 祈使句
-   - fragment: 省略/片段
+{sf_lines}
 5. orthography（正字法状态）：
    - standard: 标准汉语
    - community_variant: 社群变体（梗、谐音、缩写等）
@@ -102,6 +111,7 @@ class PromptBuilder:
         return "\n".join(parts)
     
     def build_sentence_function_prompt(self, danmaku_content: str) -> str:
+        sf_block = "\n".join(f"- {label}: {desc}" for label, desc in SENTENCE_FUNCTION_TYPES)
         return f"""请判断以下弹幕的言语行为类型（句类）。
 
 【待分析弹幕】
@@ -112,18 +122,14 @@ class PromptBuilder:
 ```json
 {{
     "sentence_function": {{
-        "label": "assertion | question | exclamation | directive | fragment",
+        "label": "{SENTENCE_FUNCTION_LABELS}",
         "confidence": 0.92
     }}
 }}
 ```
 
 【句类说明】
-- assertion: 陈述句（陈述事实或观点）
-- question: 疑问句（提出问题）
-- exclamation: 感叹句（表达强烈情感）
-- directive: 祈使句（发出指令或请求）
-- fragment: 省略/片段（不完整的句子）
+{sf_block}
 """
     
     def build_complex_prompt(

@@ -168,6 +168,18 @@ class TimelineSegmenter:
         
         return segments
     
+    @staticmethod
+    def _combine(prev: TimeSegment, current: TimeSegment) -> TimeSegment:
+        """相邻两段合并（时间跨度、弹幕索引、密度重算），zone_type 留待后续重新标记"""
+        duration = current.end_time - prev.start_time
+        return TimeSegment(
+            start_time=prev.start_time,
+            end_time=current.end_time,
+            danmaku_indices=prev.danmaku_indices + current.danmaku_indices,
+            density=(prev.danmaku_count + current.danmaku_count) / duration if duration > 0 else 0.0,
+            zone_type="",
+        )
+    
     def _merge_small_segments(self, segments: List[TimeSegment]) -> List[TimeSegment]:
         """合并小于 MIN_SEGMENT_SAMPLES 的段"""
         if not segments:
@@ -180,33 +192,15 @@ class TimelineSegmenter:
             current = segments[i]
             
             if current.danmaku_count < self.min_segment_samples and merged:
-                prev = merged[-1]
-                merged_segment = TimeSegment(
-                    start_time=prev.start_time,
-                    end_time=current.end_time,
-                    danmaku_indices=prev.danmaku_indices + current.danmaku_indices,
-                    density=(prev.danmaku_count + current.danmaku_count) / 
-                            (current.end_time - prev.start_time) if (current.end_time - prev.start_time) > 0 else 0.0,
-                    zone_type="",  # 后续重新标记
-                )
-                merged[-1] = merged_segment
+                merged[-1] = self._combine(merged[-1], current)
             else:
                 merged.append(current)
             
             i += 1
         
-        if len(merged) > 1 and merged[0].danmaku_count < self.min_segment_samples:
-            first = merged[0]
-            second = merged[1]
-            merged_segment = TimeSegment(
-                start_time=first.start_time,
-                end_time=second.end_time,
-                danmaku_indices=first.danmaku_indices + second.danmaku_indices,
-                density=(first.danmaku_count + second.danmaku_count) / 
-                        (second.end_time - first.start_time) if (second.end_time - first.start_time) > 0 else 0.0,
-                zone_type="",
-            )
-            merged = [merged_segment] + merged[2:]
+        # 首段无前驱可并，向后合并直至满足阈值（或仅剩一段）
+        while len(merged) > 1 and merged[0].danmaku_count < self.min_segment_samples:
+            merged = [self._combine(merged[0], merged[1])] + merged[2:]
         
         return merged
     

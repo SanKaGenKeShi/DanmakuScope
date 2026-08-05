@@ -4,7 +4,7 @@ LLM 配置模块 - 集中管理所有 LLM 相关配置
 """
 
 import os
-from typing import List
+from typing import List, Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
@@ -66,7 +66,6 @@ class LLMSettings(BaseSettings):
         description="分析报告 LLM 温度"
     )
     
-    # LLM 共识与加权
     ENABLE_DUAL_PATH: bool = Field(
         default=True, 
         description="是否启用双路推理"
@@ -84,15 +83,13 @@ class LLMSettings(BaseSettings):
         description="低共识权重"
     )
     
-    # 思考模式
     ENABLE_THINKING: bool = Field(
         default=False,
         description="是否启用模型思考模式（Qwen等模型的reasoning/thinking）。关闭可避免content为空导致的JSON解析重试"
     )
     
-    # Prompt 配置
     PROMPT_VERSION: str = Field(
-        default="v2.2.0", 
+        default="v2.2.1", 
         description="Prompt 版本"
     )
     
@@ -116,10 +113,14 @@ class LLMSettings(BaseSettings):
         return self.ANALYSIS_REPORT_LLM_MODEL or self.COMPLEX_LLM_MODEL
 
 
-llm_settings = LLMSettings()
+llm_settings: Optional[LLMSettings] = None
 
 
 def get_llm_settings() -> LLMSettings:
+    """懒加载单例：首次调用才实例化，避免 import 副作用"""
+    global llm_settings
+    if llm_settings is None:
+        llm_settings = LLMSettings()
     return llm_settings
 
 

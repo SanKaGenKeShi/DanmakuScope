@@ -2,29 +2,29 @@
 
 B 站弹幕社会语言学分析命令行工具。采集弹幕及视频元数据，经硬统计与 LLM 软标签双通道分析后，按官方分区（tname）聚合输出交叉统计表，为社会语言学/语料库语言学实证研究提供可溯源、可复核的语料数据。
 
-当前版本：**v0.2.0-beta**
+当前版本：**v0.2.1-beta**
 
 ---
 
 ## 功能概述
 
-| 能力 | 说明 |
-|------|------|
-| 弹幕获取 | protobuf 分段接口（主路径）+ XML 兜底，支持 BV/AV/URL 输入 |
-| 预处理 | 用户级去重、基于密度的时序动态切分（ruptures PELT） |
-| 硬统计 | 词类分布、音节结构、实词密度、正字法变体率（纯正则） |
-| LLM 软标签 | 情感、合作原则、互动类型、句类、正字法状态（双路推理 + JSD 共识） |
-| 统计推断 | Wilson 置信区间 + 样本量校验，可选 Mann-Whitney U 探索性检验 |
-| 分析报告 | 可选调用 LLM 生成社会语言学语料分析报告 |
-| 产出打包 | 全部产出自动打包为 `[BV号]视频标题.zip` |
-| 语料库比较 | 跨视频语料库级聚合 + Kruskal-Wallis/Dunn 检验 + 分区缺口补足建议 + R/ggplot2 可视化脚本（v0.2.0-beta） |
+| 能力 | 说明                                                                                              |
+|------|---------------------------------------------------------------------------------------------------|
+| 弹幕获取 | protobuf 分段接口（主路径）+ XML 兜底，支持 BV/AV/URL 输入                                        |
+| 预处理 | 用户级去重、基于密度的时序动态切分（ruptures PELT）                                               |
+| 硬统计 | 词类分布、音节结构、实词密度、正字法变体率（纯正则）                                              |
+| LLM 软标签 | 情感、合作原则、互动类型、句类、正字法状态（双路推理 + JSD 共识）                                 |
+| 统计推断 | Wilson 置信区间 + 样本量校验，可选 Mann-Whitney U 探索性检验                                      |
+| 分析报告 | 可选调用 LLM 生成社会语言学语料分析报告                                                           |
+| 产出打包 | 全部产出自动打包为 `[BV号]视频标题.zip`                                                           |
+| 语料库比较 | 跨视频语料库级聚合 + Kruskal-Wallis/Dunn 检验 + 分区缺口补足建议 + R/ggplot2 可视化脚本 |
 
 ---
 
 ## 数据流
 
 ```
-输入解析 → 爬取（带缓存）→ 社会变量提取 → 用户去重 → 时序切分
+输入解析 → 爬取（带缓存）→ 社会变量构造 → 用户去重 → 时序切分
     → 硬统计 + LLM 分析（并发池）→ 聚合 → 统计验证 → 报告生成 → ZIP 打包
 ```
 
@@ -144,15 +144,19 @@ danmaku_analyzer/
 ├── pipeline.py             # 流程编排（阶段式）
 ├── config.py               # 业务配置中心（pydantic-settings）
 ├── llm_config.py           # LLM 配置中心
-├── account.py              # B 站二维码登录与凭证管理
+├── account.py              # B 站二维码登录与凭证管理（三级回退收口）
+├── partitions.py           # 分区映射单一数据源（TID↔分区名）
 ├── crawler.py              # B 站爬虫（protobuf + XML 兜底）
-├── social_variables.py     # 社会变量锚定（tname 提取）
+├── social_variables.py     # 社会变量锚定（tname + tags）
 ├── user_deduplicator.py    # 用户级去重
 ├── timeline_segmenter.py   # 时序切分（PELT / 等分）
 ├── hard_metrics.py         # 硬统计（词类/密度/正字法正则）
 ├── context_provider.py     # 微语境构建
 ├── prompt_builder.py       # Prompt 组装（社会语境注入）
-├── llm_client.py           # 双路推理 + JSD 共识
+├── llm_models.py           # LLM 输出数据模型（Pydantic）
+├── llm_consensus.py        # 共识算法纯函数（JSD/合并/权重）
+├── llm_client.py           # 双路推理编排（API 调用层）
+├── llm_factory.py          # 统一 LLM 客户端工厂
 ├── report_generator.py     # LLM 分析报告生成器
 ├── aggregator.py           # 嵌套聚合（分区/热区）
 ├── statistical_validator.py # 统计推断（Wilson CI + 语料库级 KW/Dunn/卡方检验）

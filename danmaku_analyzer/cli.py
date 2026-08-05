@@ -13,7 +13,6 @@ from rich.table import Table
 
 from .config import get_settings
 from .llm_config import get_llm_settings
-from .pipeline import analyze_video, AnalysisResult
 from .utils.logger import get_logger, setup_logger
 from . import __version__
 
@@ -59,9 +58,12 @@ async def _analyze_async(
     freq_based: bool = False,
     top_n: Optional[int] = None,
     no_cache: bool = False
-) -> AnalysisResult:
+):
     """异步分析单个视频，失败时向上抛出异常"""
-    
+    # pipeline 拖入 jieba/pandas/openai 等重型依赖，延迟到实际分析时才导入，
+    # 使 config/login/account/corpus/suggest 等轻量命令免于全量加载
+    from .pipeline import analyze_video
+
     def rich_progress_callback(stage: str, message: str):
         console.print(f"[cyan]{stage}[/cyan]: {message}")
     
@@ -83,7 +85,7 @@ async def _analyze_async(
     return result
 
 
-def _show_summary(result: AnalysisResult):
+def _show_summary(result):
     console.print("\n" + "="*60)
     console.print("[bold green]分析完成！[/bold green]")
     console.print("="*60)
@@ -158,7 +160,8 @@ async def _batch_async(
 @click.option('--from-index', is_flag=True, default=False, help='从语料库索引登记的全部视频聚合（无需列出 ZIP）')
 @click.option('--with-r', is_flag=True, default=False, help='同时生成 R 可视化脚本模板（corpus_plots.R）')
 def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_r: bool):
-    """跨视频语料库级聚合（回读单视频 ZIP 报告，按分区输出比较表）"""
+    """跨视频语料库级聚合（回读单视频 ZIP 报告，按分区输出比较表并打包快照）"""
+    from .config import get_settings
     from .corpus_builder import CorpusBuilder
 
     if not from_index and not zip_list:
@@ -168,20 +171,54 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_r: boo
     try:
         builder = CorpusBuilder()
         if from_index:
-            path = builder.build_from_index(output)
+            result = builder.build_from_index(output)
         else:
-            path = builder.build_from_zips(list(zip_list), output)
+            result = builder.build_from_zips(list(zip_list), output)
         console.print(f"[bold green]语料库聚合完成[/bold green]")
-        console.print(f"  聚合表: {path}")
+        console.print(f"  聚合表: {result.csv_path}")
+
+        extra_files = []
         if with_r:
             from .corpus_visualizer import CorpusVisualizer
-            r_path = CorpusVisualizer().write_r_script(os.path.dirname(path))
+            r_path = CorpusVisualizer().write_r_script(result.output_dir)
+            extra_files.append(r_path)
             console.print(f"  R 可视化脚本: {r_path}")
             console.print(f"  [dim]运行: Rscript {os.path.basename(r_path)}（需安装 R 与 ggplot2/dplyr/tidyr）[/dim]")
+
+        if get_settings().ENABLE_LLM_ANALYSIS_REPORT:
+            report_path = asyncio.run(_generate_corpus_llm_report(builder, result))
+            if report_path:
+                extra_files.append(report_path)
+                console.print(f"  LLM 比较分析报告: {report_path}")
+            else:
+                console.print("[yellow]语料库 LLM 分析报告生成失败（不影响聚合产物）[/yellow]")
+
+        zip_path = builder.package_snapshot(result, extra_files)
+        if result.zip_valid:
+            console.print(f"  语料库快照: {zip_path}")
+            console.print(f"  [dim]已收录 {len(result.source_zip_paths)} 个源视频 ZIP（原文件保留），散落源文件已清理[/dim]")
+        else:
+            console.print(f"[yellow]快照打包校验失败，散落文件已保留: {zip_path}[/yellow]")
     except Exception as e:
         console.print(f"[red]语料库聚合失败: {e}[/red]")
         logger.error(f"语料库聚合失败: {e}", exc_info=True)
         sys.exit(1)
+
+
+async def _generate_corpus_llm_report(builder, result) -> Optional[str]:
+    """生成语料库级 LLM 比较分析报告并落盘，返回文件路径（失败返回 None）"""
+    from .report_generator import AnalysisReportGenerator
+
+    corpus_metadata = builder.build_snapshot_metadata(result)
+    content = await AnalysisReportGenerator().generate_corpus_report(
+        result.csv_path, result.videos_csv_path, corpus_metadata
+    )
+    if not content:
+        return None
+    report_path = os.path.join(result.output_dir, "corpus_analysis_report.md")
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+    return report_path
 
 
 @cli.command()

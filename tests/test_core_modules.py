@@ -509,7 +509,7 @@ class TestReporterMetadata:
             "pubdate": "2025-08-05T12:00:00",
             "view_count": 12345,
             "danmaku_count": 40,
-            "pipeline_version": "0.2.0-beta",
+            "pipeline_version": "0.2.1-beta",
         }
         filepath = reporter._generate_metadata(aggregated, extra)
         with open(filepath, 'r', encoding='utf-8') as f:

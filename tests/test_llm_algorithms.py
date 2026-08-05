@@ -39,13 +39,19 @@ class TestCalculateJSD:
         assert jsd == pytest.approx(0.0, abs=1e-6)
 
     def test_opposite_outputs_high_jsd(self, client):
-        """完全对立的输出 → JSD > 0"""
+        """各维度完全对立的输出 → JSD 显著大于 0（多维均值语义）"""
         outputs = [
-            {"emotion": {"label": "positive", "confidence": 0.95}},
-            {"emotion": {"label": "negative", "confidence": 0.95}},
+            {"emotion": {"label": "positive", "confidence": 0.95},
+             "interaction_type": {"label": "expression", "confidence": 0.95},
+             "orthography": {"status": "standard", "confidence": 0.95},
+             "cooperative_principle": {"violated": False, "maxim": "quality"}},
+            {"emotion": {"label": "negative", "confidence": 0.95},
+             "interaction_type": {"label": "mocking", "confidence": 0.95},
+             "orthography": {"status": "non_standard_typo", "confidence": 0.95},
+             "cooperative_principle": {"violated": True, "maxim": "manner"}},
         ]
         jsd = client._calculate_jsd(outputs)
-        assert jsd > 0.3  # 应该显著大于 0
+        assert jsd > 0.5  # 各维均对立，均值应接近 ln2
 
     def test_single_output_returns_zero(self, client):
         """单个输出无法计算散度 → 返回 0"""
@@ -167,7 +173,7 @@ class TestMergeOutputs:
         assert result.emotion.label == "positive"
 
     def test_low_consensus_takes_highest_confidence(self, client):
-        """低共识 → 取置信度最高的输出"""
+        """低共识 → 按各维 confidence 总和择优（非仅情感单维）"""
         outputs = [
             {"emotion": {"label": "positive", "confidence": 0.4},
              "cooperative_principle": {"violated": False, "maxim": "quality"},

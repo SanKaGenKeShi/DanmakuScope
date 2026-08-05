@@ -6,7 +6,7 @@ LLM 配置已独立到 llm_config.py
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
@@ -39,6 +39,7 @@ class Settings(BaseSettings):
 
     ENABLE_LLM_TOKENIZER: bool = Field(default=False, description="是否启用LLM辅助分词，复用SIMPLE_LLM")
     LLM_TOKENIZER_MIN_LENGTH: int = Field(default=20, description="触发LLM分词的最小文本长度")
+    LLM_TOKENIZER_CONCURRENCY: int = Field(default=8, description="LLM分词批量并发上限")
 
     CONTEXT_TIME_WINDOW: float = Field(default=5.0, description="微语境时间窗口（秒）")
     MAX_CONTEXT_TOKENS: int = Field(default=200, description="微语境最大 token 数")
@@ -118,14 +119,18 @@ class Settings(BaseSettings):
         return os.path.join(self.DATA_ROOT, raw_path)
 
 
-settings = Settings()
+_settings: Optional[Settings] = None
 
 
 def get_settings() -> Settings:
-    return settings
+    """懒加载单例：首次调用才实例化，避免 import 即创建 DATA_ROOT 等副作用"""
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
 
 
 def reload_settings() -> Settings:
-    global settings
-    settings = Settings()
-    return settings
+    global _settings
+    _settings = Settings()
+    return _settings

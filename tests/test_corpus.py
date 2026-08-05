@@ -62,7 +62,7 @@ def make_fake_zip(
         "partitions": [tname],
         "bvid": bvid, "title": f"测试-{bvid}", "tname": tname, "tags": [],
         "pubdate": pubdate, "view_count": 1000, "danmaku_count": danmaku_count,
-        "pipeline_version": "0.2.0-beta",
+        "pipeline_version": "0.2.1-beta",
     }
     zip_path = os.path.join(str(dir_path), f"[{bvid}]test.zip")
     with zipfile.ZipFile(zip_path, 'w') as zipf:
@@ -145,9 +145,9 @@ class TestCorpusBuilder:
         zip_paths = [str(p) for p in tmp_path.glob("*.zip")]
 
         builder = CorpusBuilder()
-        out_csv = builder.build_from_zips(zip_paths, output_dir=str(tmp_path / "out"))
+        result = builder.build_from_zips(zip_paths, output_dir=str(tmp_path / "out"))
 
-        df = pd.read_csv(out_csv, encoding='utf-8-sig')
+        df = pd.read_csv(result.csv_path, encoding='utf-8-sig')
         assert len(df) == 2
         game = df[df["tname"] == "游戏"].iloc[0]
         assert game["video_count"] == 2
@@ -167,8 +167,8 @@ class TestCorpusBuilder:
         zip_paths = [str(p) for p in tmp_path.glob("*.zip")]
 
         builder = CorpusBuilder()
-        out_csv = builder.build_from_zips(zip_paths, output_dir=str(tmp_path / "out"))
-        df = pd.read_csv(out_csv, encoding='utf-8-sig')
+        result = builder.build_from_zips(zip_paths, output_dir=str(tmp_path / "out"))
+        df = pd.read_csv(result.csv_path, encoding='utf-8-sig')
         assert df.iloc[0]["video_count"] == 1
 
     def test_weighted_policy_merges_zones(self, tmp_path, tmp_store):
@@ -209,9 +209,9 @@ class TestCorpusBuilder:
         make_fake_zip(tmp_path, "BV1ok", "游戏")
 
         builder = CorpusBuilder()
-        out_csv = builder.build_from_zips([str(bad_zip), str(next(tmp_path.glob("*ok*.zip")))],
+        result = builder.build_from_zips([str(bad_zip), str(next(tmp_path.glob("*ok*.zip")))],
                                            output_dir=str(tmp_path / "out"))
-        df = pd.read_csv(out_csv, encoding='utf-8-sig')
+        df = pd.read_csv(result.csv_path, encoding='utf-8-sig')
         assert df.iloc[0]["video_count"] == 1
 
     def test_empty_input_raises(self, tmp_path):
@@ -253,10 +253,98 @@ class TestCorpusBuilder:
 
         builder = CorpusBuilder()
         get_settings().ENABLE_TEMPORAL_GROUPING = True
-        out_csv = builder.build_from_zips(zip_paths, output_dir=str(tmp_path / "out"))
-        df = pd.read_csv(out_csv, encoding='utf-8-sig')
+        result = builder.build_from_zips(zip_paths, output_dir=str(tmp_path / "out"))
+        df = pd.read_csv(result.csv_path, encoding='utf-8-sig')
         assert len(df) == 2
         assert set(df["time_period"].astype(str)) == {"2023", "2025"}
+
+
+# ========== 语料库快照打包测试 ==========
+
+class TestCorpusPackaging:
+
+    def test_package_snapshot_contains_all_and_keeps_source(self, tmp_path, tmp_store):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        make_fake_zip(src_dir, "BV1p1", "游戏")
+        make_fake_zip(src_dir, "BV1p2", "音乐")
+        zip_paths = [str(p) for p in src_dir.glob("*.zip")]
+
+        builder = CorpusBuilder()
+        result = builder.build_from_zips(zip_paths, output_dir=str(tmp_path / "out"))
+        zip_path = builder.package_snapshot(result)
+
+        assert result.zip_valid
+        assert os.path.basename(zip_path).startswith("[corpus]_2videos_")
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            names = set(zipf.namelist())
+        assert {"corpus_summary.csv", "corpus_videos.csv", "corpus_metadata.json"} <= names
+        assert "videos/[BV1p1]test.zip" in names and "videos/[BV1p2]test.zip" in names
+        # 散落源文件已清理，但源视频 ZIP 原文件一律保留
+        out_files = {p.name for p in (tmp_path / "out").iterdir()}
+        assert out_files == {os.path.basename(zip_path)}
+        assert len(list(src_dir.glob("*.zip"))) == 2
+
+    def test_snapshot_metadata_records_evidence_chain(self, tmp_path, tmp_store):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        make_fake_zip(src_dir, "BV1m1", "游戏", prompt_version="v2.2.0")
+        make_fake_zip(src_dir, "BV1m2", "游戏", prompt_version="v3.0.0")
+        zip_paths = [str(p) for p in src_dir.glob("*.zip")]
+
+        builder = CorpusBuilder()
+        result = builder.build_from_zips(zip_paths, output_dir=str(tmp_path / "out"))
+        builder.package_snapshot(result)
+
+        zip_path = result.zip_path
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            meta = json.loads(zipf.read("corpus_metadata.json"))
+        assert meta["video_count"] == 2
+        assert meta["bvids"] == ["BV1m1", "BV1m2"]
+        assert meta["prompt_versions"] == ["v2.2.0", "v3.0.0"]
+        assert meta["zone_policy"] == get_settings().CORPUS_ZONE_POLICY
+        assert meta["pipeline_version"]
+
+    def test_package_includes_extra_files(self, tmp_path, tmp_store):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        make_fake_zip(src_dir, "BV1e1", "游戏")
+
+        builder = CorpusBuilder()
+        result = builder.build_from_zips([str(next(src_dir.glob("*.zip")))],
+                                          output_dir=str(tmp_path / "out"))
+        extra = os.path.join(result.output_dir, "corpus_analysis_report.md")
+        with open(extra, 'w', encoding='utf-8') as f:
+            f.write("# 报告正文")
+        builder.package_snapshot(result, extra_files=[extra])
+
+        assert result.zip_valid
+        with zipfile.ZipFile(result.zip_path, 'r') as zipf:
+            assert "corpus_analysis_report.md" in zipf.namelist()
+            assert zipf.read("corpus_analysis_report.md").decode('utf-8') == "# 报告正文"
+
+
+class TestCorpusReportPrompt:
+
+    def test_corpus_user_prompt_contains_overview_and_groups(self, tmp_path, tmp_store):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        make_fake_zip(src_dir, "BV1r1", "游戏", density=0.4)
+        make_fake_zip(src_dir, "BV1r2", "音乐", density=0.8)
+
+        builder = CorpusBuilder()
+        result = builder.build_from_zips([str(p) for p in src_dir.glob("*.zip")],
+                                          output_dir=str(tmp_path / "out"))
+        meta = builder.build_snapshot_metadata(result)
+        assert meta["video_count"] == 2
+
+        with patch("danmaku_analyzer.report_generator.AsyncOpenAI"):
+            from danmaku_analyzer.report_generator import AnalysisReportGenerator
+            gen = AnalysisReportGenerator()
+        prompt = gen._build_corpus_user_prompt(result.csv_path, result.videos_csv_path, meta)
+        assert "语料库概况" in prompt
+        assert "组级聚合数据" in prompt
+        assert "BV1r1" in prompt and "BV1r2" in prompt
 
 
 if __name__ == "__main__":

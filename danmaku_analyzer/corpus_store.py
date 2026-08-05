@@ -5,6 +5,7 @@
 
 import json
 import os
+import tempfile
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -40,8 +41,17 @@ class CorpusStore:
             return self._empty_index()
 
     def save(self, index: Dict):
-        with open(self.index_path, 'w', encoding='utf-8') as f:
-            json.dump(index, f, ensure_ascii=False, indent=2)
+        """原子写入：先写同目录临时文件再 rename 替换，避免写入中断损坏索引"""
+        directory = os.path.dirname(os.path.abspath(self.index_path))
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".corpus_index_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(index, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.index_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
         logger.info(f"语料库索引已保存: {self.index_path}（{len(index['videos'])} 个视频）")
 
     def register_video(self, entry: Dict) -> Dict:

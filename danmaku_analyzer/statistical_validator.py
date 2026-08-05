@@ -1,7 +1,7 @@
 """
 统计验证模块 - 描述性统计 + 置信区间 + 可选显著性检验
 包含 Wilson 置信区间、描述性统计、Mann-Whitney U 检验（可选），
-以及语料库级比较检验：Kruskal-Wallis / Dunn 事后检验 / BH-FDR / Cramér's V / Cliff's delta（手写零运行时 scipy 依赖）
+以及语料库级比较检验：Kruskal-Wallis / Dunn 事后检验 / BH-FDR / Cramér's V / Cliff's delta（手写实现，不新增 scipy 依赖；Wilson CI 与 Mann-Whitney U 仍使用既有 scipy 依赖）
 """
 
 import math

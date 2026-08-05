@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Set
 
 from .config import get_settings
 from .corpus_store import CorpusStore
+from .partitions import PARTITION_TO_TID
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -23,15 +24,6 @@ _KEYWORD_TAG_RE = re.compile(r"</?em[^>]*>")
 def _clean_title(raw: str) -> str:
     """去除高亮标签与 HTML 实体转义（如 <em class=\"keyword\">、&amp;）"""
     return html.unescape(_KEYWORD_TAG_RE.sub("", raw)).strip()
-
-
-# B站一级分区名 → 搜索分区过滤 tid（与 crawler.TID_TO_TNAME 一级分区一致）
-PARTITION_TO_TID: Dict[str, int] = {
-    "动画": 1, "番剧": 13, "国创": 167, "音乐": 3, "舞蹈": 129,
-    "游戏": 4, "知识": 36, "科技": 188, "运动": 234, "汽车": 223,
-    "生活": 160, "美食": 211, "动物圈": 217, "鬼畜": 119, "时尚": 155,
-    "娱乐": 5, "影视": 181, "纪录片": 177, "电影": 23, "电视剧": 11,
-}
 
 
 @dataclass

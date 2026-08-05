@@ -1,101 +1,40 @@
 """
 LLM 客户端模块 - 双路推理 + 四维输出（含正字法状态）
-包含复杂任务双路推理和简单任务单路推理
+职责：API 调用 + 重试 + 双路/简单任务编排
+数据模型见 llm_models.py，JSD 共识度量与合并策略见 llm_consensus.py
 """
 
 import json
 import asyncio
-from typing import List, Dict, Any, Optional, Literal
-from dataclasses import dataclass
-from enum import Enum
+from typing import List, Dict, Any
 
-import numpy as np
 import regex
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .llm_config import get_llm_settings
+from .llm_factory import complex_async_client, simple_async_client
 from .prompt_builder import PromptComponents
 from .utils.logger import get_logger
+from .llm_models import (
+    EmotionOutput, CooperativePrincipleOutput, InteractionTypeOutput,
+    SentenceFunctionOutput, OrthographyOutput,
+    ConsensusLevel, LLMOutput, DualPathResult,
+    default_llm_output, dict_to_llm_output,
+)
+from .llm_consensus import (
+    calculate_jsd, determine_consensus_level, merge_outputs, calculate_weight_multiplier,
+)
 
 logger = get_logger(__name__)
 
-
-class EmotionOutput(BaseModel):
-    """情感分析输出"""
-    label: Literal["positive", "neutral", "negative"] = "neutral"
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-
-
-class CooperativePrincipleOutput(BaseModel):
-    """合作原则输出"""
-    violated: bool = False
-    maxim: Literal["quality", "quantity", "relation", "manner"] = "quality"
-
-
-class InteractionTypeOutput(BaseModel):
-    """互动类型输出"""
-    label: Literal["check_in", "identity_claim", "mocking", "info_request", "expression", "other"] = "other"
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-
-
-class SentenceFunctionOutput(BaseModel):
-    """句类判断输出"""
-    label: Literal["assertion", "question", "exclamation", "directive", "fragment"] = "fragment"
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-
-
-class OrthographyOutput(BaseModel):
-    """正字法状态输出"""
-    status: Literal["standard", "community_variant", "non_standard_typo"] = "standard"
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-
-
-class ConsensusLevel(Enum):
-    """共识水平"""
-    HIGH = "high"  # JSD < 0.15
-    MEDIUM = "medium"  # 0.15 <= JSD < 0.4
-    LOW = "low"  # JSD >= 0.4
-
-
-@dataclass
-class LLMOutput:
-    """LLM 输出结果（类型化）"""
-    emotion: EmotionOutput
-    cooperative_principle: CooperativePrincipleOutput
-    interaction_type: InteractionTypeOutput
-    sentence_function: SentenceFunctionOutput
-    orthography: OrthographyOutput
-    
-    def to_dict(self) -> dict:
-        return {
-            "emotion": self.emotion.model_dump(),
-            "cooperative_principle": self.cooperative_principle.model_dump(),
-            "interaction_type": self.interaction_type.model_dump(),
-            "sentence_function": self.sentence_function.model_dump(),
-            "orthography": self.orthography.model_dump(),
-        }
-
-
-@dataclass
-class DualPathResult:
-    """双路推理结果"""
-    output: LLMOutput
-    consensus_level: ConsensusLevel
-    jsd_score: float
-    weight_multiplier: float  # 低共识时为 0.2
-    raw_outputs: List[Dict]
-    prompt_version: str
-    
-    def to_dict(self) -> dict:
-        return {
-            "output": self.output.to_dict(),
-            "consensus_level": self.consensus_level.value,
-            "jsd_score": round(self.jsd_score, 4),
-            "weight_multiplier": self.weight_multiplier,
-            "prompt_version": self.prompt_version,
-        }
+# 向后兼容：历史导入方（aggregator/pipeline/tests/__init__）均从本模块取符号
+__all__ = [
+    "LLMClient",
+    "EmotionOutput", "CooperativePrincipleOutput", "InteractionTypeOutput",
+    "SentenceFunctionOutput", "OrthographyOutput",
+    "ConsensusLevel", "LLMOutput", "DualPathResult",
+]
 
 
 class LLMClient:
@@ -103,23 +42,13 @@ class LLMClient:
     def __init__(self):
         llm_cfg = get_llm_settings()
         
-        self.complex_client = AsyncOpenAI(
-            base_url=llm_cfg.COMPLEX_LLM_BASE_URL,
-            api_key=llm_cfg.COMPLEX_LLM_API_KEY,
-            timeout=60.0,
-        )
+        self.complex_client = complex_async_client()
         self.complex_model = llm_cfg.COMPLEX_LLM_MODEL
         self.complex_temperatures = llm_cfg.COMPLEX_LLM_TEMPERATURES
         
-        self.simple_client = AsyncOpenAI(
-            base_url=llm_cfg.SIMPLE_LLM_BASE_URL,
-            api_key=llm_cfg.SIMPLE_LLM_API_KEY,
-            timeout=60.0,
-        )
+        self.simple_client = simple_async_client()
         self.simple_model = llm_cfg.SIMPLE_LLM_MODEL
         self.simple_temperature = llm_cfg.SIMPLE_LLM_TEMPERATURE
-        
-
         
         self.jsd_threshold_low = llm_cfg.JSD_THRESHOLD_LOW
         self.jsd_threshold_medium = llm_cfg.JSD_THRESHOLD_MEDIUM
@@ -127,14 +56,6 @@ class LLMClient:
         
         self.enable_dual_path = llm_cfg.ENABLE_DUAL_PATH
         self.enable_thinking = llm_cfg.ENABLE_THINKING
-        
-        # API Key 占位符检测：未配置 .env 时提前提示，避免运行时报 401 无从排查
-        for name, key in (
-            ("COMPLEX_LLM_API_KEY", llm_cfg.COMPLEX_LLM_API_KEY),
-            ("SIMPLE_LLM_API_KEY", llm_cfg.SIMPLE_LLM_API_KEY),
-        ):
-            if key in ("sk-xxx", "sk-yyy", ""):
-                logger.warning(f"{name} 未配置（当前为占位值），请在 .env 中设置真实 Key")
         
         logger.info(
             f"LLM 客户端初始化完成，"
@@ -154,7 +75,6 @@ class LLMClient:
         temperature: float
     ) -> Dict[str, Any]:
         try:
-            extra_body = {"enable_thinking": self.enable_thinking} if not self.enable_thinking else None
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
@@ -163,7 +83,7 @@ class LLMClient:
                 ],
                 temperature=temperature,
                 response_format={"type": "json_object"},
-                **({"extra_body": extra_body} if extra_body is not None else {}),
+                extra_body={"enable_thinking": self.enable_thinking},
             )
             
             content = response.choices[0].message.content
@@ -217,7 +137,7 @@ class LLMClient:
             # 全部路径失败：保留默认输出并强制低共识（权重 0.2）
             logger.warning("复杂任务全部推理路径失败，使用默认输出并标记为低共识")
             return DualPathResult(
-                output=self._default_llm_output(),
+                output=default_llm_output(),
                 consensus_level=ConsensusLevel.LOW,
                 jsd_score=1.0,
                 weight_multiplier=self.low_consensus_weight,
@@ -291,96 +211,22 @@ class LLMClient:
         
         return complex_result
     
+    # ---- 共识算法委托（实现见 llm_consensus.py），保留实例方法签名兼容既有调用 ----
+    
     def _calculate_jsd(self, outputs: List[Dict]) -> float:
-        """情感分布的 Jensen-Shannon 散度"""
-        if len(outputs) < 2:
-            return 0.0
-        
-        try:
-            emotion_labels = ["positive", "neutral", "negative"]
-            
-            distributions = []
-            for output in outputs:
-                emotion = output.get("emotion", {})
-                label = emotion.get("label", "neutral")
-                confidence = emotion.get("confidence", 0.5)
-                
-                dist = np.zeros(len(emotion_labels))
-                if label in emotion_labels:
-                    idx = emotion_labels.index(label)
-                    dist[idx] = confidence
-                    remaining = (1 - confidence) / (len(emotion_labels) - 1)
-                    for i in range(len(emotion_labels)):
-                        if i != idx:
-                            dist[i] = remaining
-                else:
-                    dist = np.ones(len(emotion_labels)) / len(emotion_labels)
-                
-                distributions.append(dist)
-            
-            # epsilon 平滑避免零概率除零
-            eps = 1e-10
-            distributions = [d + eps for d in distributions]
-            distributions = [d / d.sum() for d in distributions]
-            
-            avg_dist = np.mean(distributions, axis=0)
-            jsd = 0.0
-            for dist in distributions:
-                kl = np.sum(dist * np.log(dist / avg_dist))
-                jsd += kl
-            jsd /= len(distributions)
-            
-            return float(jsd)
-            
-        except Exception as e:
-            # 无法计算等同于不确定，按最大散度处理（LOW 共识、权重 0.2），遵循保守策略
-            logger.warning(f"JSD 计算失败，按最大散度处理: {e}")
-            return 1.0
+        return calculate_jsd(outputs)
     
     def _determine_consensus_level(self, jsd_score: float) -> ConsensusLevel:
-        if jsd_score < self.jsd_threshold_low:
-            return ConsensusLevel.HIGH
-        elif jsd_score < self.jsd_threshold_medium:
-            return ConsensusLevel.MEDIUM
-        else:
-            return ConsensusLevel.LOW
+        return determine_consensus_level(jsd_score, self.jsd_threshold_low, self.jsd_threshold_medium)
     
-    def _merge_outputs(
-        self, 
-        outputs: List[Dict], 
-        consensus_level: ConsensusLevel
-    ) -> LLMOutput:
-        if not outputs:
-            return self._default_llm_output()
-        
-        if consensus_level == ConsensusLevel.HIGH:
-            return self._dict_to_llm_output(outputs[0])
-        
-        best_output = max(outputs, key=lambda x: x.get("emotion", {}).get("confidence", 0))
-        return self._dict_to_llm_output(best_output)
+    def _merge_outputs(self, outputs: List[Dict], consensus_level: ConsensusLevel) -> LLMOutput:
+        return merge_outputs(outputs, consensus_level)
     
     def _calculate_weight_multiplier(self, consensus_level: ConsensusLevel) -> float:
-        if consensus_level == ConsensusLevel.LOW:
-            return self.low_consensus_weight
-        else:
-            return 1.0
+        return calculate_weight_multiplier(consensus_level, self.low_consensus_weight)
     
     def _default_llm_output(self) -> LLMOutput:
-        return LLMOutput(
-            emotion=EmotionOutput(),
-            cooperative_principle=CooperativePrincipleOutput(),
-            interaction_type=InteractionTypeOutput(),
-            sentence_function=SentenceFunctionOutput(),
-            orthography=OrthographyOutput(),
-        )
+        return default_llm_output()
     
     def _dict_to_llm_output(self, data: Dict) -> LLMOutput:
-        """dict → 类型化 LLMOutput（容错）"""
-        return LLMOutput(
-            emotion=EmotionOutput.model_validate(data.get("emotion", {})),
-            cooperative_principle=CooperativePrincipleOutput.model_validate(data.get("cooperative_principle", {})),
-            interaction_type=InteractionTypeOutput.model_validate(data.get("interaction_type", {})),
-            sentence_function=SentenceFunctionOutput.model_validate(data.get("sentence_function", {})),
-            orthography=OrthographyOutput.model_validate(data.get("orthography", {})),
-        )
-
+        return dict_to_llm_output(data)

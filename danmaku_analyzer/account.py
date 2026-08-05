@@ -6,13 +6,16 @@ import asyncio
 import json
 import os
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
 from urllib.parse import parse_qsl, urlparse
 
 import httpx
 
 from .config import get_settings
 from .utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from bilibili_api import Credential
 
 logger = get_logger(__name__)
 
@@ -44,6 +47,53 @@ class QrLoginError(Exception):
 
 def default_credential_path() -> str:
     return os.path.join(get_settings().DATA_ROOT, "credential.json")
+
+
+def credential_from_file(path: str) -> Optional["Credential"]:
+    """JSON 凭证文件 → Credential（字段：sessdata/bili_jct/buvid3），失败返回 None"""
+    from bilibili_api import Credential
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        sessdata = data.get("sessdata") or data.get("SESSDATA", "")
+        bili_jct = data.get("bili_jct") or data.get("BILIBILI_JCT", "")
+        buvid3 = data.get("buvid3") or data.get("BILIBILI_BUVID3", "")
+        if not sessdata:
+            logger.warning(f"凭证文件缺少 sessdata 字段: {path}")
+            return None
+        return Credential(sessdata=sessdata, bili_jct=bili_jct, buvid3=buvid3)
+    except Exception as e:
+        logger.error(f"凭证文件加载失败: {path} - {e}")
+        return None
+
+
+def resolve_credential(credential_file: Optional[str] = None) -> tuple[Optional["Credential"], str]:
+    """凭证解析唯一入口，三级回退：指定文件 → 登录保存的默认文件 → Settings 环境变量
+
+    返回 (credential, source)，source ∈ {'file', 'login', 'settings', ''}
+    """
+    from bilibili_api import Credential
+
+    if credential_file:
+        credential = credential_from_file(credential_file)
+        if credential:
+            return credential, "file"
+
+    default_path = default_credential_path()
+    if os.path.exists(default_path):
+        credential = credential_from_file(default_path)
+        if credential:
+            return credential, "login"
+
+    settings = get_settings()
+    logger.info(f"检查凭证: SESSDATA={'有' if settings.BILIBILI_SESSDATA else '无'}")
+    if settings.BILIBILI_SESSDATA:
+        return Credential(
+            sessdata=settings.BILIBILI_SESSDATA,
+            bili_jct=settings.BILIBILI_JCT,
+            buvid3=settings.BILIBILI_BUVID3,
+        ), "settings"
+    return None, ""
 
 
 async def qr_login(
@@ -130,7 +180,7 @@ def _extract_cookies(resp: httpx.Response, data: dict) -> dict:
 
 
 def _to_credential(cookies: dict) -> dict:
-    """Cookie 字段 → 凭证文件格式（与 pipeline._load_credential_file 兼容）"""
+    """Cookie 字段 → 凭证文件格式（与 credential_from_file 兼容）"""
     return {
         "sessdata": cookies.get("SESSDATA", ""),
         "bili_jct": cookies.get("bili_jct", ""),

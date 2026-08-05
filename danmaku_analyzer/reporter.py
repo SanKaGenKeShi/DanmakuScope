@@ -74,34 +74,11 @@ class Reporter:
                 "tags": metadata.get("tags", []) if metadata else [],
             }
             
-            aggregated_dicts = []
-            for data in aggregated_data:
-                aggregated_dicts.append({
-                    "tname": data.tname,
-                    "zone_type": data.zone_type,
-                    "danmaku_count": data.danmaku_count,
-                    "video_count": data.video_count,
-                    "segment_count": data.segment_count,
-                    "emotion_distribution": data.emotion_distribution,
-                    "sentence_function_distribution": data.sentence_function_distribution,
-                    "interaction_type_distribution": data.interaction_type_distribution,
-                    "orthography_status_distribution": data.orthography_status_distribution,
-                    "high_consensus_rate": data.high_consensus_rate,
-                    "medium_consensus_rate": data.medium_consensus_rate,
-                    "low_consensus_rate": data.low_consensus_rate,
-                    "avg_weight_multiplier": data.avg_weight_multiplier,
-                    "avg_word_length": data.avg_word_length,
-                    "content_word_density": data.content_word_density,
-                    "punctuation_emoji_rate": data.punctuation_emoji_rate,
-                    "pos_distribution": data.pos_distribution,
-                    "syllable_distribution": data.syllable_distribution,
-                    "orthography_hard_metrics": data.orthography_hard_metrics,
-                })
+            aggregated_dicts = [data.to_flat_dict() for data in aggregated_data]
             
             report_content = await report_gen.generate(
                 aggregated_data=aggregated_dicts,
-                metadata=report_metadata,
-                prompt_version=get_llm_settings().PROMPT_VERSION
+                metadata=report_metadata
             )
             
             if not report_content:
@@ -229,6 +206,7 @@ class Reporter:
     def _generate_consensus_table(self, data: List[AggregatedData]) -> str:
         rows = []
         for item in data:
+            ci = item.consensus_ci or {}
             row = {
                 "tname": item.tname,
                 "zone_type": item.zone_type,
@@ -237,6 +215,9 @@ class Reporter:
                 "medium_consensus_rate": item.medium_consensus_rate,
                 "low_consensus_rate": item.low_consensus_rate,
                 "avg_weight_multiplier": item.avg_weight_multiplier,
+                "high_consensus_ci_lower": ci.get("lower"),
+                "high_consensus_ci_upper": ci.get("upper"),
+                "high_consensus_ci_status": ci.get("status", "ok"),
             }
             rows.append(row)
         

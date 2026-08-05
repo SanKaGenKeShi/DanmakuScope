@@ -42,12 +42,9 @@ class InputParser:
     AV_PATTERN = re.compile(r'^av(\d+)$', re.IGNORECASE)
     
     URL_PATTERNS = [
-        # 完整链接
         re.compile(r'https?://www\.bilibili\.com/video/(BV[a-zA-Z0-9]{10})', re.IGNORECASE),
         re.compile(r'https?://www\.bilibili\.com/video/(av\d+)', re.IGNORECASE),
-        # 短链接
         re.compile(r'https?://b23\.tv/([a-zA-Z0-9]+)', re.IGNORECASE),
-        # 嵌入链接
         re.compile(r'https?://player\.bilibili\.com/player\.html\?.*?bvid=(BV[a-zA-Z0-9]{10})', re.IGNORECASE),
         re.compile(r'https?://player\.bilibili\.com/player\.html\?.*?aid=(\d+)', re.IGNORECASE),
     ]
@@ -84,7 +81,6 @@ class InputParser:
         if match:
             # 前缀标准化为 BV，ID 部分保留原始大小写（B站BV号大小写敏感）
             bvid = 'BV' + input_str[2:]
-            
             logger.info(f"解析到 BV 号: {bvid}")
             return ParsedInput(
                 input_type=InputType.BV,

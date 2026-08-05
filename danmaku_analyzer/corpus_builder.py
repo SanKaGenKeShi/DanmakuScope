@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from . import __version__
 from .config import get_settings
 from .utils.logger import get_logger
 
@@ -52,20 +53,34 @@ class VideoSummary:
     distributions: Dict[str, float] = field(default_factory=dict)  # 列名（含前缀）→ 占比
 
 
+@dataclass
+class CorpusBuildResult:
+    """语料库聚合产物：打包前的散落文件清单与来源 ZIP"""
+    csv_path: str
+    videos_csv_path: str
+    source_zip_paths: List[str] = field(default_factory=list)
+    output_dir: str = ""
+    warnings: List[str] = field(default_factory=list)
+    zip_path: Optional[str] = None
+    zip_valid: bool = False
+
+
 class CorpusBuilder:
 
-    def build_from_zips(self, zip_paths: List[str], output_dir: Optional[str] = None) -> str:
-        """回读多个 ZIP → 登记索引 → 聚合输出语料库级 CSV，返回输出路径"""
+    def build_from_zips(self, zip_paths: List[str], output_dir: Optional[str] = None) -> CorpusBuildResult:
+        """回读多个 ZIP → 登记索引 → 聚合输出语料库级 CSV，返回构建结果"""
         from .corpus_store import CorpusStore
 
         store = CorpusStore()
         summaries: List[VideoSummary] = []
+        readable_zips: List[str] = []
         for path in zip_paths:
             try:
                 metadata, tables = self.read_zip(path)
             except (OSError, zipfile.BadZipFile, KeyError, ValueError) as e:
                 logger.warning(f"跳过无法回读的 ZIP: {path} - {e}")
                 continue
+            readable_zips.append(path)
             try:
                 store.register_video(self._index_entry(metadata, path))
             except ValueError as e:
@@ -75,14 +90,15 @@ class CorpusBuilder:
             except ValueError as e:
                 logger.warning(f"跳过无法摘要的 ZIP: {path} - {e}")
 
-        return self._aggregate_and_write(summaries, output_dir)
+        return self._aggregate_and_write(summaries, output_dir, readable_zips)
 
-    def build_from_index(self, output_dir: Optional[str] = None) -> str:
+    def build_from_index(self, output_dir: Optional[str] = None) -> CorpusBuildResult:
         """从语料库索引登记的全部视频聚合"""
         from .corpus_store import CorpusStore
 
         store = CorpusStore()
         summaries: List[VideoSummary] = []
+        readable_zips: List[str] = []
         for video in store.get_videos():
             zip_path = store.resolve_zip_path(video.get("zip_path", ""))
             if not os.path.exists(zip_path):
@@ -93,12 +109,13 @@ class CorpusBuilder:
             except (OSError, zipfile.BadZipFile, KeyError, ValueError) as e:
                 logger.warning(f"跳过无法回读的 ZIP: {zip_path} - {e}")
                 continue
+            readable_zips.append(zip_path)
             try:
                 summaries.extend(self.summarize_video(metadata, tables))
             except ValueError as e:
                 logger.warning(f"跳过无法摘要的 ZIP: {zip_path} - {e}")
 
-        return self._aggregate_and_write(summaries, output_dir)
+        return self._aggregate_and_write(summaries, output_dir, readable_zips)
 
     def read_zip(self, zip_path: str) -> Tuple[Dict, Dict[str, pd.DataFrame]]:
         """回读 ZIP：metadata.json + 各聚合表 CSV；缺失必需文件时抛 KeyError"""
@@ -194,7 +211,12 @@ class CorpusBuilder:
             merged[col] = sum(float(v) * w for v, w in values) / sum(w for _, w in values)
         return merged
 
-    def _aggregate_and_write(self, summaries: List[VideoSummary], output_dir: Optional[str]) -> str:
+    def _aggregate_and_write(
+        self,
+        summaries: List[VideoSummary],
+        output_dir: Optional[str],
+        source_zip_paths: Optional[List[str]] = None,
+    ) -> CorpusBuildResult:
         if not summaries:
             raise ValueError("无可聚合的视频摘要（请检查 ZIP 是否包含 metadata.json 与聚合表）")
 
@@ -211,10 +233,13 @@ class CorpusBuilder:
             key = (s.tname, time_period, s.zone_type or "")
             groups[key].append(s)
 
+        warnings: List[str] = []
         rows = []
         for (tname, time_period, zone_type), items in sorted(groups.items()):
             if len(items) < min_videos:
-                logger.warning(f"分区 {tname}{f'({time_period})' if time_period else ''} 视频数 {len(items)} < {min_videos}，结果仅供参考")
+                msg = f"分区 {tname}{f'({time_period})' if time_period else ''} 视频数 {len(items)} < {min_videos}，结果仅供参考"
+                logger.warning(msg)
+                warnings.append(msg)
             rows.append(self._aggregate_group(tname, time_period, zone_type, items))
 
         df = pd.DataFrame(rows)
@@ -227,7 +252,125 @@ class CorpusBuilder:
         # 视频级观测表：KW/Dunn 等检验的原始观测来源（组级 mean/std 无法还原个体值）
         videos_path = os.path.join(out_dir, "corpus_videos.csv")
         self._write_video_observations(summaries, videos_path)
-        return filepath
+        return CorpusBuildResult(
+            csv_path=filepath,
+            videos_csv_path=videos_path,
+            source_zip_paths=list(source_zip_paths or []),
+            output_dir=out_dir,
+            warnings=warnings,
+        )
+
+    def package_snapshot(
+        self,
+        result: CorpusBuildResult,
+        extra_files: Optional[List[str]] = None,
+    ) -> str:
+        """把语料库产物打包为自包含快照 ZIP（时间戳命名）
+
+        包内：corpus_metadata.json + 聚合 CSV + 附加文件（R 脚本/LLM 报告）+ videos/ 下的源视频 ZIP。
+        源视频 ZIP 仅复制入包，原文件一律保留；校验通过才删除包内已收录的散落源文件。
+        """
+        out_dir = result.output_dir
+        meta = self.build_snapshot_metadata(result)
+        meta_path = os.path.join(out_dir, "corpus_metadata.json")
+        with open(meta_path, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zip_filename = f"[corpus]_{meta['video_count']}videos_{timestamp}.zip"
+        zip_path = os.path.join(out_dir, zip_filename)
+
+        loose_files = [result.csv_path, result.videos_csv_path, meta_path] + list(extra_files or [])
+        # 源 ZIP 按基名去重（同名冲突保留先出现的），全部置于 videos/ 前缀下
+        source_entries: List[Tuple[str, str]] = []
+        seen_names = set()
+        for path in result.source_zip_paths:
+            base = os.path.basename(path)
+            if base in seen_names:
+                logger.warning(f"源 ZIP 基名冲突，跳过重复收录: {path}")
+                continue
+            if not os.path.exists(path):
+                logger.warning(f"源 ZIP 已不存在，无法收录: {path}")
+                continue
+            seen_names.add(base)
+            source_entries.append((path, f"videos/{base}"))
+
+        try:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for path in loose_files:
+                    if os.path.exists(path):
+                        zipf.write(path, os.path.basename(path))
+                for path, arcname in source_entries:
+                    zipf.write(path, arcname)
+        except OSError as e:
+            logger.error(f"语料库快照打包失败: {zip_path} - {e}")
+            return zip_path
+
+        expected_count = sum(1 for p in loose_files if os.path.exists(p)) + len(source_entries)
+        if self._validate_snapshot(zip_path, expected_count):
+            result.zip_path = zip_path
+            result.zip_valid = True
+            deleted = 0
+            for path in loose_files:
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                        deleted += 1
+                    except OSError as e:
+                        logger.warning(f"删除失败: {os.path.basename(path)} - {e}")
+            logger.info(f"语料库快照已打包: {zip_filename}（源视频 ZIP 收录 {len(source_entries)} 个，原文件保留；已删除 {deleted} 个散落源文件）")
+        else:
+            logger.warning(f"语料库快照校验失败，保留散落文件: {zip_path}")
+        return zip_path
+
+    def build_snapshot_metadata(self, result: CorpusBuildResult) -> Dict:
+        """构建快照元数据（自描述证据链：纳入视频/版本/策略/告警），供打包与 LLM 报告共用"""
+        settings = get_settings()
+        bvids = self._read_bvids(result.videos_csv_path)
+        return {
+            "generated_at": datetime.now().isoformat(timespec='seconds'),
+            "pipeline_version": __version__,
+            "zone_policy": settings.CORPUS_ZONE_POLICY,
+            "temporal_grouping": settings.ENABLE_TEMPORAL_GROUPING,
+            "temporal_granularity": settings.TEMPORAL_GRANULARITY,
+            "video_count": len(bvids),
+            "bvids": bvids,
+            "prompt_versions": self._read_prompt_versions(result.videos_csv_path),
+            "warnings": result.warnings,
+        }
+
+    @staticmethod
+    def _validate_snapshot(zip_path: str, expected_count: int) -> bool:
+        if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+            return False
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zipf:
+                names = zipf.namelist()
+                if len(names) != expected_count:
+                    return False
+                if names:
+                    zipf.read(names[0])
+                return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _read_bvids(videos_csv_path: str) -> List[str]:
+        try:
+            df = pd.read_csv(videos_csv_path, encoding='utf-8-sig', usecols=["bvid"])
+            return sorted(df["bvid"].astype(str).unique().tolist())
+        except Exception as e:
+            logger.warning(f"回读 bvid 清单失败: {e}")
+            return []
+
+    @staticmethod
+    def _read_prompt_versions(videos_csv_path: str) -> List[str]:
+        try:
+            df = pd.read_csv(videos_csv_path, encoding='utf-8-sig', usecols=["prompt_version"])
+            return sorted(str(v) for v in df["prompt_version"].dropna().unique() if str(v))
+        except Exception as e:
+            logger.warning(f"回读 prompt_version 清单失败: {e}")
+            return []
 
     def _write_video_observations(self, summaries: List[VideoSummary], filepath: str):
         records = []

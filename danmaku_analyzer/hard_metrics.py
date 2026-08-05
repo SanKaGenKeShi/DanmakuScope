@@ -9,17 +9,31 @@ import json
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 import jieba
 import jieba.posseg as pseg
 import emoji
 import regex
-from openai import OpenAI
 
 from .config import get_settings
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_POS_ALIASES = {
+    "noun": "n", "verb": "v", "adjective": "a", "adj": "a",
+    "adverb": "d", "adv": "d", "pronoun": "r", "auxiliary": "v",
+    "preposition": "p", "prep": "p", "conjunction": "c", "conj": "c",
+    "particle": "u", "interjection": "e", "modal": "y",
+    "onomatopoeia": "o", "proper_noun": "nz", "proper noun": "nz",
+}
+
+
+def _normalize_pos(pos: str) -> str:
+    """LLM 返回英文词性标签时归一化为 jieba 单字母风格，未知标签原样保留"""
+    cleaned = pos.strip()
+    return _POS_ALIASES.get(cleaned.lower(), cleaned)
 
 
 @dataclass
@@ -43,16 +57,14 @@ class HardMetricsAnalyzer:
         
         self.enable_llm_tokenizer = self.settings.ENABLE_LLM_TOKENIZER
         self.llm_tokenizer_min_length = self.settings.LLM_TOKENIZER_MIN_LENGTH
+        self.llm_tokenizer_concurrency = self.settings.LLM_TOKENIZER_CONCURRENCY
         
         self.llm_client = None
         if self.enable_llm_tokenizer:
             from .llm_config import get_llm_settings
+            from .llm_factory import simple_sync_client
             llm_cfg = get_llm_settings()
-            self.llm_client = OpenAI(
-                base_url=llm_cfg.SIMPLE_LLM_BASE_URL,
-                api_key=llm_cfg.SIMPLE_LLM_API_KEY,
-                timeout=30.0,
-            )
+            self.llm_client = simple_sync_client(timeout=30.0)
             self.llm_model = llm_cfg.SIMPLE_LLM_MODEL
             self.enable_thinking = llm_cfg.ENABLE_THINKING
             logger.info(f"LLM 分词已启用，模型: {self.llm_model}，最小触发长度: {self.llm_tokenizer_min_length}")
@@ -73,17 +85,34 @@ class HardMetricsAnalyzer:
                 except Exception as e:
                     logger.error(f"加载词典失败 {filename}: {e}")
     
-    def _tokenize(self, text: str) -> List[Tuple[str, str]]:
-        """智能分词：根据配置选择 jieba 或 LLM"""
-        if (self.enable_llm_tokenizer and 
-            self.llm_client is not None and 
-            len(text) >= self.llm_tokenizer_min_length):
-            try:
-                return self._llm_tokenize(text)
-            except Exception as e:
-                logger.warning(f"LLM 分词失败，回退到 jieba: {e}")
+    def _tokenize_batch(self, danmaku_list: List[str]) -> List[List[Tuple[str, str]]]:
+        """批量分词：长文本并发走 LLM 分词（单条失败各自回退 jieba），其余直接 jieba"""
+        results: List[Optional[List[Tuple[str, str]]]] = [None] * len(danmaku_list)
+        llm_indices = []
+        for i, text in enumerate(danmaku_list):
+            if (self.enable_llm_tokenizer and
+                self.llm_client is not None and
+                len(text) >= self.llm_tokenizer_min_length):
+                llm_indices.append(i)
+            else:
+                results[i] = list(pseg.cut(text))
         
-        return list(pseg.cut(text))
+        if llm_indices:
+            texts = [danmaku_list[i] for i in llm_indices]
+            max_workers = min(self.llm_tokenizer_concurrency, len(texts))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                llm_results = list(pool.map(self._llm_tokenize_safe, texts))
+            for i, tokens in zip(llm_indices, llm_results):
+                results[i] = tokens
+        
+        return results  # type: ignore[return-value]
+    
+    def _llm_tokenize_safe(self, text: str) -> List[Tuple[str, str]]:
+        try:
+            return self._llm_tokenize(text)
+        except Exception as e:
+            logger.warning(f"LLM 分词失败，回退到 jieba: {e}")
+            return list(pseg.cut(text))
     
     def _llm_tokenize(self, text: str) -> List[Tuple[str, str]]:
         prompt = f"""请对以下中文文本进行分词和词性标注。
@@ -112,9 +141,8 @@ class HardMetricsAnalyzer:
                 "model": self.llm_model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.0,
+                "extra_body": {"enable_thinking": self.enable_thinking},
             }
-            if not self.enable_thinking:
-                kwargs["extra_body"] = {"enable_thinking": False}
             response = self.llm_client.chat.completions.create(**kwargs)
             
             content = response.choices[0].message.content.strip()
@@ -125,7 +153,7 @@ class HardMetricsAnalyzer:
             result = json.loads(content)
             
             if isinstance(result, list) and all(isinstance(item, list) and len(item) == 2 for item in result):
-                return [(str(word), str(pos)) for word, pos in result]
+                return [(str(word), _normalize_pos(str(pos))) for word, pos in result]
             else:
                 raise ValueError("返回格式不正确")
                 
@@ -154,13 +182,14 @@ class HardMetricsAnalyzer:
         emoticon_pattern = regex.compile(r'[（(][\u4e00-\u9fff\w\s・ω･｡]+[）)]')
         punctuation_pattern = regex.compile(r'[!?~！？～]')
         
-        for danmaku in danmaku_list:
+        tokenized_list = self._tokenize_batch(danmaku_list)
+        
+        for danmaku, words in zip(danmaku_list, tokenized_list):
             has_punctuation = bool(punctuation_pattern.search(danmaku))
             has_emoji = bool(emoji.emoji_count(danmaku) > 0)
             if has_punctuation or has_emoji:
                 punctuation_emoji_count += 1
             
-            words = self._tokenize(danmaku)
             for word, pos in words:
                 if not word.strip():
                     continue

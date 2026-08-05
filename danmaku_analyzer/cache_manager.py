@@ -3,7 +3,6 @@
 """
 
 import os
-import json
 import hashlib
 import pickle
 from typing import Any, Optional
@@ -14,6 +13,10 @@ from .config import get_settings
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# 缓存 schema 版本：Pydantic 模型字段变动（增/删/改名）时必须 +1，
+# 旧版本缓存会在读取时被丢弃并重新拉取，避免 pickle 反序列化静默出错
+CACHE_SCHEMA_VERSION = 1
 
 
 class CacheManager:
@@ -27,9 +30,9 @@ class CacheManager:
     def _get_cache_key(self, key: str) -> str:
         return hashlib.md5(key.encode()).hexdigest()
     
-    def _get_cache_path(self, key: str, extension: str = ".pkl") -> str:
+    def _get_cache_path(self, key: str) -> str:
         cache_key = self._get_cache_key(key)
-        return os.path.join(self.cache_dir, f"{cache_key}{extension}")
+        return os.path.join(self.cache_dir, f"{cache_key}.pkl")
     
     def get(self, key: str, max_age_hours: int = 24) -> Optional[Any]:
         cache_path = self._get_cache_path(key)
@@ -46,8 +49,12 @@ class CacheManager:
         try:
             with open(cache_path, 'rb') as f:
                 data = pickle.load(f)
+            if not isinstance(data, dict) or data.get("schema_version") != CACHE_SCHEMA_VERSION:
+                logger.info(f"缓存 schema 版本不匹配，丢弃: {key}")
+                self.delete(key)
+                return None
             logger.debug(f"缓存命中: {key}")
-            return data
+            return data["payload"]
         except Exception as e:
             logger.error(f"读取缓存失败: {e}")
             return None
@@ -57,7 +64,7 @@ class CacheManager:
         
         try:
             with open(cache_path, 'wb') as f:
-                pickle.dump(value, f)
+                pickle.dump({"schema_version": CACHE_SCHEMA_VERSION, "payload": value}, f)
             logger.debug(f"缓存设置成功: {key}")
             return True
         except Exception as e:
@@ -100,53 +107,6 @@ class CacheManager:
         
         logger.info(f"清理缓存完成: {cleared_count} 个文件")
         return cleared_count
-    
-    def get_json(self, key: str, max_age_hours: int = 24) -> Optional[dict]:
-        cache_path = self._get_cache_path(key, extension=".json")
-        
-        if not os.path.exists(cache_path):
-            return None
-        
-        file_mtime = datetime.fromtimestamp(os.path.getmtime(cache_path))
-        if datetime.now() - file_mtime > timedelta(hours=max_age_hours):
-            logger.info(f"JSON 缓存已过期: {key}")
-            self.delete_json(key)
-            return None
-        
-        try:
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            logger.debug(f"JSON 缓存命中: {key}")
-            return data
-        except Exception as e:
-            logger.error(f"读取 JSON 缓存失败: {e}")
-            return None
-    
-    def set_json(self, key: str, value: dict) -> bool:
-        cache_path = self._get_cache_path(key, extension=".json")
-        
-        try:
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                json.dump(value, f, ensure_ascii=False, indent=2)
-            logger.debug(f"JSON 缓存设置成功: {key}")
-            return True
-        except Exception as e:
-            logger.error(f"设置 JSON 缓存失败: {e}")
-            return False
-    
-    def delete_json(self, key: str) -> bool:
-        cache_path = self._get_cache_path(key, extension=".json")
-        
-        if not os.path.exists(cache_path):
-            return True
-        
-        try:
-            os.remove(cache_path)
-            logger.debug(f"JSON 缓存删除成功: {key}")
-            return True
-        except Exception as e:
-            logger.error(f"删除 JSON 缓存失败: {e}")
-            return False
 
 
 _cache_manager: Optional[CacheManager] = None

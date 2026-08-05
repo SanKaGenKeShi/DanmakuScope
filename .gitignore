@@ -73,7 +73,8 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
-danmaku_analyzer/Project_framework.md
+AGENTS.md
+.docs/
 danmaku_analyzer/data/cache/*
 danmaku_analyzer/data/corpus_index.json
 danmaku_analyzer/data/logs/*.log

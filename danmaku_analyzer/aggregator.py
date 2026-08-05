@@ -41,6 +41,7 @@ class AggregatedData:
     medium_consensus_rate: float = 0.0
     low_consensus_rate: float = 0.0
     avg_weight_multiplier: float = 1.0
+    llm_record_count: int = 0  # 参与共识统计的 LLM 记录数（共识率与 CI 的基数）
     
     consensus_ci: Optional[Dict[str, Any]] = None
     
@@ -71,8 +72,33 @@ class AggregatedData:
                 "medium_consensus_rate": round(self.medium_consensus_rate, 4),
                 "low_consensus_rate": round(self.low_consensus_rate, 4),
                 "avg_weight_multiplier": round(self.avg_weight_multiplier, 4),
+                "llm_record_count": self.llm_record_count,
                 "consensus_ci": self.consensus_ci,
             },
+        }
+
+    def to_flat_dict(self) -> dict:
+        """扁平序列化（LLM 报告输入用，字段与历史手工拆解保持一致）"""
+        return {
+            "tname": self.tname,
+            "zone_type": self.zone_type,
+            "danmaku_count": self.danmaku_count,
+            "video_count": self.video_count,
+            "segment_count": self.segment_count,
+            "emotion_distribution": self.emotion_distribution,
+            "sentence_function_distribution": self.sentence_function_distribution,
+            "interaction_type_distribution": self.interaction_type_distribution,
+            "orthography_status_distribution": self.orthography_status_distribution,
+            "high_consensus_rate": self.high_consensus_rate,
+            "medium_consensus_rate": self.medium_consensus_rate,
+            "low_consensus_rate": self.low_consensus_rate,
+            "avg_weight_multiplier": self.avg_weight_multiplier,
+            "avg_word_length": self.avg_word_length,
+            "content_word_density": self.content_word_density,
+            "punctuation_emoji_rate": self.punctuation_emoji_rate,
+            "pos_distribution": self.pos_distribution,
+            "syllable_distribution": self.syllable_distribution,
+            "orthography_hard_metrics": self.orthography_hard_metrics,
         }
 
 
@@ -267,6 +293,7 @@ class Aggregator:
                 low_count += 1
         
         if total > 0:
+            aggregated.llm_record_count = total
             aggregated.high_consensus_rate = high_count / total
             aggregated.medium_consensus_rate = medium_count / total
             aggregated.low_consensus_rate = low_count / total

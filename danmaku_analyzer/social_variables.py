@@ -6,8 +6,6 @@ tags 不聚类，原样传给 Prompt 构建器作上下文
 from typing import List
 from dataclasses import dataclass
 
-from .crawler import VideoMeta
-
 
 @dataclass
 class SocialVariables:
@@ -16,12 +14,3 @@ class SocialVariables:
 
     def to_dict(self) -> dict:
         return {"tname": self.tname, "tags": self.tags}
-
-
-class SocialVariableExtractor:
-
-    def extract(self, video_meta: VideoMeta) -> SocialVariables:
-        return SocialVariables(tname=video_meta.tname, tags=video_meta.tags)
-
-    def extract_batch(self, video_metas: List[VideoMeta]) -> List[SocialVariables]:
-        return [self.extract(m) for m in video_metas]

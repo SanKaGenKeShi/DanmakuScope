@@ -6,9 +6,12 @@ import json
 import os
 from typing import List, Dict, Any, Optional
 
-from openai import AsyncOpenAI
+import pandas as pd
+from openai import AsyncOpenAI  # noqa: F401 保留供测试 patch，客户端构造统一走 llm_factory
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .llm_config import get_llm_settings
+from .llm_factory import analysis_report_async_client
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,11 +24,7 @@ class AnalysisReportGenerator:
         """初始化报告生成器（使用 ANALYSIS_REPORT_LLM 配置，留空则复用 COMPLEX_LLM）"""
         llm_cfg = get_llm_settings()
 
-        self.client = AsyncOpenAI(
-            base_url=llm_cfg.effective_analysis_report_base_url,
-            api_key=llm_cfg.effective_analysis_report_api_key,
-            timeout=120.0,  # 报告生成可能需要更长时间
-        )
+        self.client = analysis_report_async_client(timeout=120.0)  # 报告生成可能需要更长时间
         self.model = llm_cfg.effective_analysis_report_model
         self.temperature = llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE
         self.enable_thinking = llm_cfg.ENABLE_THINKING
@@ -35,8 +34,7 @@ class AnalysisReportGenerator:
     async def generate(
         self,
         aggregated_data: List[Dict[str, Any]],
-        metadata: Dict[str, Any],
-        prompt_version: str
+        metadata: Dict[str, Any]
     ) -> Optional[str]:
         logger.info("开始生成社会语言学语料分析报告")
 
@@ -44,28 +42,110 @@ class AnalysisReportGenerator:
         user_prompt = self._build_user_prompt(aggregated_data, metadata)
 
         try:
-            kwargs = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": self.temperature,
-            }
-            if not self.enable_thinking:
-                kwargs["extra_body"] = {"enable_thinking": False}
-            response = await self.client.chat.completions.create(**kwargs)
-
-            report_content = response.choices[0].message.content
-            if not report_content:
-                logger.error("分析报告生成失败: 模型返回内容为空")
-                return None
+            report_content = await self._call_llm(system_prompt, user_prompt)
             logger.info("社会语言学语料分析报告生成完成")
             return report_content
-
         except Exception as e:
             logger.error(f"分析报告生成失败: {e}")
             return None
+
+    async def generate_corpus_report(
+        self,
+        summary_csv_path: str,
+        videos_csv_path: str,
+        corpus_metadata: Dict[str, Any],
+    ) -> Optional[str]:
+        """语料库级比较分析报告：输入为组级聚合表 + 视频级观测表 + 快照元数据"""
+        logger.info("开始生成语料库级社会语言学比较分析报告")
+
+        try:
+            user_prompt = self._build_corpus_user_prompt(summary_csv_path, videos_csv_path, corpus_metadata)
+        except Exception as e:
+            logger.error(f"语料库报告输入构建失败: {e}")
+            return None
+
+        try:
+            report_content = await self._call_llm(self._build_corpus_system_prompt(), user_prompt)
+            logger.info("语料库级比较分析报告生成完成")
+            return report_content
+        except Exception as e:
+            logger.error(f"语料库报告生成失败: {e}")
+            return None
+
+    def _build_corpus_system_prompt(self) -> str:
+        spec_content = self._load_report_spec()
+        return f"""你是一位资深的社会语言学家，专注于网络语言和社交媒体语料分析。
+
+当前分析对象：B站弹幕跨视频语料库（多个视频、可能跨多个分区的聚合比较数据）。
+
+你的任务是基于提供的语料库级聚合数据，撰写一份严谨、专业的跨分区/跨视频比较分析报告。
+重点在于组间差异的语言学解释（而非单视频描述），并明确指出统计检验结论需以 Kruskal-Wallis/Dunn 等后续验证为准，本报告仅为描述性解读。
+
+【重要】你必须严格遵循以下规范文档的要求，确保报告的学术规范性和一致性：
+
+{spec_content}
+
+请严格按照上述规范的术语定义、报告结构、写作规范和质量检查清单生成报告。"""
+
+    def _build_corpus_user_prompt(
+        self,
+        summary_csv_path: str,
+        videos_csv_path: str,
+        corpus_metadata: Dict[str, Any],
+    ) -> str:
+        summary_df = pd.read_csv(summary_csv_path, encoding='utf-8-sig')
+        videos_df = pd.read_csv(videos_csv_path, encoding='utf-8-sig')
+
+        max_groups = 12
+        if len(summary_df) > max_groups:
+            logger.warning(
+                f"语料库组数 {len(summary_df)} 超过提示词容量上限，仅取前 {max_groups} 组送入 LLM 报告生成，"
+                f"其余 {len(summary_df) - max_groups} 组未纳入报告分析"
+            )
+
+        group_rows = []
+        for record in summary_df.head(max_groups).to_dict(orient='records'):
+            group_rows.append({
+                k: (round(v, 4) if isinstance(v, float) else v) for k, v in record.items()
+            })
+
+        data_summary = {
+            "语料库概况": {
+                "视频数": int(corpus_metadata.get("video_count", 0)),
+                "纳入视频bvid": corpus_metadata.get("bvids", []),
+                "prompt版本": corpus_metadata.get("prompt_versions", []),
+                "冷热区策略": corpus_metadata.get("zone_policy", ""),
+                "视频总弹幕数": int(videos_df["danmaku_count"].sum()) if "danmaku_count" in videos_df.columns else 0,
+                "聚合告警": corpus_metadata.get("warnings", []),
+            },
+            "组级聚合数据": group_rows,
+        }
+
+        return f"""请根据以下语料库级结构化数据，撰写跨分区/跨视频的社会语言学比较分析报告：
+
+## 输入数据
+```json
+{json.dumps(data_summary, ensure_ascii=False, indent=2)}
+```
+
+请按照报告要求，生成一份完整、专业的社会语言学比较分析报告。"""
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
+        """单次 API 调用（含重试）；空内容与瞬时故障抛错触发 tenacity 重试"""
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=self.temperature,
+            extra_body={"enable_thinking": self.enable_thinking},
+        )
+        report_content = response.choices[0].message.content
+        if not report_content:
+            raise ValueError("模型返回内容为空")
+        return report_content
 
     def _build_system_prompt(self, metadata: Dict[str, Any]) -> str:
         """构建分析报告的系统提示词（加载规范文档）"""
@@ -141,6 +221,12 @@ class AnalysisReportGenerator:
             },
             "聚合数据摘要": [],
         }
+
+        if len(aggregated_data) > 3:
+            logger.warning(
+                f"聚合组数 {len(aggregated_data)} 超过提示词容量上限，仅取前 3 组送入 LLM 报告生成，"
+                f"其余 {len(aggregated_data) - 3} 组未纳入报告分析"
+            )
 
         for i, data in enumerate(aggregated_data[:3]):  # 最多3组数据
             summary = {
