@@ -42,7 +42,7 @@ def make_llm_output(
     """创建测试用 LLMOutput"""
     return LLMOutput(
         emotion=EmotionOutput(label=emotion_label, confidence=0.9),
-        cooperative_principle=CooperativePrincipleOutput(violated=False, maxim="quality"),
+        cooperative_principle=CooperativePrincipleOutput(violated=False),
         interaction_type=InteractionTypeOutput(label=interaction_type_label, confidence=0.8),
         sentence_function=SentenceFunctionOutput(label=sentence_function_label, confidence=0.85),
         orthography=OrthographyOutput(status=orthography_status, confidence=0.95),
@@ -509,7 +509,7 @@ class TestReporterMetadata:
             "pubdate": "2025-08-05T12:00:00",
             "view_count": 12345,
             "danmaku_count": 40,
-            "pipeline_version": "0.2.1-beta",
+            "pipeline_version": "0.2.2-beta",
         }
         filepath = reporter._generate_metadata(aggregated, extra)
         with open(filepath, 'r', encoding='utf-8') as f:

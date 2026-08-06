@@ -9,23 +9,17 @@ import json
 import pickle
 
 import pytest
-from unittest.mock import patch
 
 from danmaku_analyzer.cache_manager import CacheManager
 from danmaku_analyzer.config import get_settings
 from danmaku_analyzer.hard_metrics import HardMetricsAnalyzer
-from danmaku_analyzer.llm_client import ConsensusLevel, LLMClient
+from danmaku_analyzer.llm_consensus import calculate_jsd, determine_consensus_level, merge_outputs
+from danmaku_analyzer.llm_config import get_llm_settings
+from danmaku_analyzer.llm_models import ConsensusLevel
 from danmaku_analyzer.pipeline import _stage_aggregate
 
 from test_core_modules import make_danmaku_record
-from test_fixes import _FakeSyncClient
-
-
-@pytest.fixture
-def client():
-    with patch("danmaku_analyzer.llm_client.AsyncOpenAI"):
-        c = LLMClient()
-    return c
+from test_fixes import _FakeAsyncClient
 
 
 # ========== #1：共识 CI 基数与共识率基数一致（LLM 记录数） ==========
@@ -67,15 +61,16 @@ class TestMultiDimJSD:
          "cooperative_principle": {"violated": True, "maxim": "manner"}},
     )
 
-    def test_emotion_same_but_other_dims_oppose_not_high(self, client):
+    def test_emotion_same_but_other_dims_oppose_not_high(self):
         a = {"emotion": {"label": "positive", "confidence": 0.95}}
         b = {"emotion": {"label": "positive", "confidence": 0.95}}
         a.update(self._OPPOSING_OTHER_DIMS[0])
         b.update(self._OPPOSING_OTHER_DIMS[1])
-        jsd = client._calculate_jsd([a, b])
-        assert client._determine_consensus_level(jsd) != ConsensusLevel.HIGH
+        jsd = calculate_jsd([a, b])
+        cfg = get_llm_settings()
+        assert determine_consensus_level(jsd, cfg.JSD_THRESHOLD_LOW, cfg.JSD_THRESHOLD_MEDIUM) != ConsensusLevel.HIGH
 
-    def test_emotion_oppose_but_others_same_diluted(self, client):
+    def test_emotion_oppose_but_others_same_diluted(self):
         base = {"interaction_type": {"label": "expression", "confidence": 0.9},
                 "orthography": {"status": "standard", "confidence": 0.9},
                 "cooperative_principle": {"violated": False, "maxim": "quality"}}
@@ -83,24 +78,25 @@ class TestMultiDimJSD:
         b = {"emotion": {"label": "negative", "confidence": 0.95}}
         a.update(base)
         b.update(base)
-        jsd = client._calculate_jsd([a, b])
-        # 单维对立被其余三维稀释：旧实现约 0.56，新均值语义降至约 0.14
-        assert jsd < 0.2
+        jsd = calculate_jsd([a, b])
+        # 单维对立被其余三维稀释：归一化后约 1/4 维完全分歧 ≈ 0.25
+        assert jsd < 0.3
 
-    def test_all_dims_oppose_low_consensus(self, client):
+    def test_all_dims_oppose_low_consensus(self):
         a = {"emotion": {"label": "positive", "confidence": 0.95}}
         b = {"emotion": {"label": "negative", "confidence": 0.95}}
         a.update(self._OPPOSING_OTHER_DIMS[0])
         b.update(self._OPPOSING_OTHER_DIMS[1])
-        jsd = client._calculate_jsd([a, b])
-        assert client._determine_consensus_level(jsd) == ConsensusLevel.LOW
+        jsd = calculate_jsd([a, b])
+        cfg = get_llm_settings()
+        assert determine_consensus_level(jsd, cfg.JSD_THRESHOLD_LOW, cfg.JSD_THRESHOLD_MEDIUM) == ConsensusLevel.LOW
 
 
 # ========== #3：非高共识时按多维 confidence 总和择优 ==========
 
 class TestMultiDimMerge:
 
-    def test_high_emotion_confidence_does_not_win_alone(self, client):
+    def test_high_emotion_confidence_does_not_win_alone(self):
         out_a = {"emotion": {"label": "positive", "confidence": 0.98},
                  "interaction_type": {"label": "expression", "confidence": 0.3},
                  "orthography": {"status": "standard", "confidence": 0.3},
@@ -111,28 +107,29 @@ class TestMultiDimMerge:
                  "orthography": {"status": "community_variant", "confidence": 0.9},
                  "cooperative_principle": {"violated": True, "maxim": "manner"},
                  "sentence_function": {"label": "exclamation", "confidence": 0.8}}
-        merged = client._merge_outputs([out_a, out_b], ConsensusLevel.MEDIUM)
+        merged = merge_outputs([out_a, out_b], ConsensusLevel.MEDIUM)
         # B 多维总和 2.5 > A 的 1.58，即使 A 的情感自信度更高
         assert merged.emotion.label == "negative"
 
 
-# ========== #4：LLM 分词批量并发 + 单条失败回退 jieba ==========
+# ========== #4：LLM 分词批量并发（信号量限速）+ 单条失败回退 jieba ==========
 
-class _CountingSyncClient(_FakeSyncClient):
+class _CountingAsyncClient(_FakeAsyncClient):
     def __init__(self, payload):
-        super().__init__(payload)
+        super().__init__([payload])
         self.create_calls = 0
         inner_create = self.chat.completions.create
 
-        def counting_create(**kwargs):
+        async def counting_create(**kwargs):
             self.create_calls += 1
-            return inner_create(**kwargs)
+            self.chat.completions.payloads.append(self.chat.completions.payloads[0])
+            return await inner_create(**kwargs)
 
         self.chat.completions.create = counting_create
 
 
 class _RaisingCompletions:
-    def create(self, **kwargs):
+    async def create(self, **kwargs):
         raise RuntimeError("接口故障")
 
 
@@ -140,34 +137,36 @@ class _RaisingChat:
     completions = _RaisingCompletions()
 
 
-class _RaisingSyncClient:
+class _RaisingAsyncClient:
     chat = _RaisingChat()
+
+
+def _make_llm_tokenizer_analyzer(client):
+    analyzer = HardMetricsAnalyzer()
+    analyzer.enable_llm_tokenizer = True
+    analyzer.llm_tokenizer_min_length = 4
+    analyzer.llm_client = client
+    analyzer.llm_model = "fake"
+    analyzer.enable_thinking = False
+    analyzer.llm_semaphore = asyncio.Semaphore(4)
+    return analyzer
 
 
 class TestBatchLLMTokenize:
 
     def test_long_texts_all_sent_to_llm(self):
-        analyzer = HardMetricsAnalyzer()
-        analyzer.enable_llm_tokenizer = True
-        analyzer.llm_tokenizer_min_length = 4
-        analyzer.llm_tokenizer_concurrency = 4
-        analyzer.llm_client = _CountingSyncClient(json.dumps([["你好", "noun"]]))
-        analyzer.llm_model = "fake"
-        analyzer.enable_thinking = False
+        analyzer = _make_llm_tokenizer_analyzer(
+            _CountingAsyncClient(json.dumps([["你好", "noun"]]))
+        )
         long_texts = ["这是一条足够长的弹幕文本", "另一条同样足够长的弹幕", "第三条也足够长的弹幕啊"]
-        result = analyzer.analyze(long_texts + ["短"])
+        result = asyncio.run(analyzer.analyze_async(long_texts + ["短"]))
         assert analyzer.llm_client.create_calls == 3
         assert result.total_danmaku_count == 4
         assert result.total_word_count > 0
 
     def test_llm_failure_falls_back_to_jieba(self):
-        analyzer = HardMetricsAnalyzer()
-        analyzer.enable_llm_tokenizer = True
-        analyzer.llm_tokenizer_min_length = 4
-        analyzer.llm_client = _RaisingSyncClient()
-        analyzer.llm_model = "fake"
-        analyzer.enable_thinking = False
-        result = analyzer.analyze(["这是一条足够长的弹幕文本", "短"])
+        analyzer = _make_llm_tokenizer_analyzer(_RaisingAsyncClient())
+        result = asyncio.run(analyzer.analyze_async(["这是一条足够长的弹幕文本", "短"]))
         assert result.total_danmaku_count == 2
         assert result.total_word_count > 0
 

@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 from unittest.mock import patch
 
+import danmaku_analyzer.corpus_builder as corpus_builder_module
 import danmaku_analyzer.corpus_store as corpus_store_module
 from danmaku_analyzer.corpus_store import CorpusStore
 from danmaku_analyzer.corpus_builder import CorpusBuilder
@@ -62,7 +63,7 @@ def make_fake_zip(
         "partitions": [tname],
         "bvid": bvid, "title": f"测试-{bvid}", "tname": tname, "tags": [],
         "pubdate": pubdate, "view_count": 1000, "danmaku_count": danmaku_count,
-        "pipeline_version": "0.2.1-beta",
+        "pipeline_version": "0.2.2-beta",
     }
     zip_path = os.path.join(str(dir_path), f"[{bvid}]test.zip")
     with zipfile.ZipFile(zip_path, 'w') as zipf:
@@ -82,7 +83,8 @@ def tmp_store(monkeypatch, tmp_path):
     """把 CorpusStore 重定向到临时索引，避免污染真实 DATA_ROOT"""
     real_store = corpus_store_module.CorpusStore
     index_path = str(tmp_path / "corpus_index.json")
-    monkeypatch.setattr(corpus_store_module, "CorpusStore", lambda: real_store(index_path=index_path))
+    # corpus_builder 顶部导入已绑定符号，必须 patch 消费方命名空间
+    monkeypatch.setattr(corpus_builder_module, "CorpusStore", lambda: real_store(index_path=index_path))
     return real_store(index_path=index_path)
 
 
@@ -171,22 +173,22 @@ class TestCorpusBuilder:
         df = pd.read_csv(result.csv_path, encoding='utf-8-sig')
         assert df.iloc[0]["video_count"] == 1
 
-    def test_weighted_policy_merges_zones(self, tmp_path, tmp_store):
+    def test_weighted_policy_merges_zones(self, tmp_path, tmp_store, monkeypatch):
         make_fake_zip(tmp_path, "BV1w", "游戏", danmaku_count=300, zones=("hot_zone", "cold_zone"))
         zip_path = str(next(tmp_path.glob("*.zip")))
 
         builder = CorpusBuilder()
-        get_settings().CORPUS_ZONE_POLICY = "weighted"
+        monkeypatch.setattr(get_settings(), "CORPUS_ZONE_POLICY", "weighted")
         summaries = builder.summarize_video(*builder.read_zip(zip_path))
         assert len(summaries) == 1
         assert summaries[0].danmaku_count == 300
 
-    def test_all_policy_keeps_zone_dimension(self, tmp_path, tmp_store):
+    def test_all_policy_keeps_zone_dimension(self, tmp_path, tmp_store, monkeypatch):
         make_fake_zip(tmp_path, "BV1a", "游戏", zones=("hot_zone", "cold_zone"))
         zip_path = str(next(tmp_path.glob("*.zip")))
 
         builder = CorpusBuilder()
-        get_settings().CORPUS_ZONE_POLICY = "all"
+        monkeypatch.setattr(get_settings(), "CORPUS_ZONE_POLICY", "all")
         summaries = builder.summarize_video(*builder.read_zip(zip_path))
         assert len(summaries) == 2
         assert {s.zone_type for s in summaries} == {"hot_zone", "cold_zone"}
@@ -246,13 +248,13 @@ class TestCorpusBuilder:
         assert CorpusBuilder._bucket_pubdate("", "year") == "unknown"
         assert CorpusBuilder._bucket_pubdate("not-a-date", "year") == "unknown"
 
-    def test_temporal_grouping_splits_groups(self, tmp_path, tmp_store):
+    def test_temporal_grouping_splits_groups(self, tmp_path, tmp_store, monkeypatch):
         make_fake_zip(tmp_path, "BV1t1", "游戏", pubdate="2023-05-01T00:00:00")
         make_fake_zip(tmp_path, "BV1t2", "游戏", pubdate="2025-05-01T00:00:00")
         zip_paths = [str(p) for p in tmp_path.glob("*.zip")]
 
         builder = CorpusBuilder()
-        get_settings().ENABLE_TEMPORAL_GROUPING = True
+        monkeypatch.setattr(get_settings(), "ENABLE_TEMPORAL_GROUPING", True)
         result = builder.build_from_zips(zip_paths, output_dir=str(tmp_path / "out"))
         df = pd.read_csv(result.csv_path, encoding='utf-8-sig')
         assert len(df) == 2
@@ -338,7 +340,7 @@ class TestCorpusReportPrompt:
         meta = builder.build_snapshot_metadata(result)
         assert meta["video_count"] == 2
 
-        with patch("danmaku_analyzer.report_generator.AsyncOpenAI"):
+        with patch("danmaku_analyzer.llm_factory.AsyncOpenAI"):
             from danmaku_analyzer.report_generator import AnalysisReportGenerator
             gen = AnalysisReportGenerator()
         prompt = gen._build_corpus_user_prompt(result.csv_path, result.videos_csv_path, meta)

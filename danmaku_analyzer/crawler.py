@@ -3,9 +3,8 @@
 支持 BV号、AV号、完整链接解析
 """
 
-import asyncio
 import hashlib
-import re
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Optional, Literal
 from pydantic import BaseModel, Field, ConfigDict, field_serializer
@@ -13,7 +12,6 @@ from pydantic import BaseModel, Field, ConfigDict, field_serializer
 from bilibili_api import video, Credential, HEADERS
 import httpx
 
-from .config import get_settings
 from .partitions import TID_TO_TNAME
 from .utils.logger import get_logger
 
@@ -55,7 +53,6 @@ class DanmakuItem(BaseModel):
 class BilibiliCrawler:
     
     def __init__(self, credential: Optional[Credential] = None):
-        self.settings = get_settings()
         self.credential = credential
     
     async def fetch_video_metadata(self, bvid: str) -> VideoMeta:
@@ -162,7 +159,7 @@ class BilibiliCrawler:
     async def _fetch_danmaku_xml_fallback(self, bvid: str, cid: Optional[int] = None) -> List[DanmakuItem]:
         """XML 接口兜底（上限约 1000 条）"""
         if cid is None:
-            cid = await self.fetch_video_cid(bvid)
+            cid = await self._fetch_video_cid(bvid)
         
         logger.info(f"使用 XML 兜底接口获取弹幕，CID: {cid}")
         url = f"https://comment.bilibili.com/{cid}.xml"
@@ -176,8 +173,6 @@ class BilibiliCrawler:
         return danmaku_list
     
     def _parse_danmaku_xml(self, xml_content: str) -> List[DanmakuItem]:
-        import xml.etree.ElementTree as ET
-        
         danmaku_list = []
         skipped_count = 0
         
@@ -219,7 +214,7 @@ class BilibiliCrawler:
         
         return danmaku_list
     
-    async def fetch_video_cid(self, bvid: str) -> int:
+    async def _fetch_video_cid(self, bvid: str) -> int:
         try:
             v = video.Video(bvid=bvid, credential=self.credential)
             info = await v.get_info()

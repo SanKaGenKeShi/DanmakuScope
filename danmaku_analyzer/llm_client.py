@@ -20,7 +20,6 @@ from .llm_models import (
     EmotionOutput, CooperativePrincipleOutput, InteractionTypeOutput,
     SentenceFunctionOutput, OrthographyOutput,
     ConsensusLevel, LLMOutput, DualPathResult,
-    default_llm_output, dict_to_llm_output,
 )
 from .llm_consensus import (
     calculate_jsd, determine_consensus_level, merge_outputs, calculate_weight_multiplier,
@@ -109,12 +108,14 @@ class LLMClient:
         prompt_components: PromptComponents
     ) -> DualPathResult:
         """双路推理（两个温度并行）+ JSD 共识判定；ENABLE_DUAL_PATH 关闭时单路"""
-        logger.info("开始复杂任务分析（双路推理）" if self.enable_dual_path else "开始复杂任务分析（单路推理）")
+        temperatures = self.complex_temperatures if self.enable_dual_path else self.complex_temperatures[:1]
+        logger.info(
+            f"开始复杂任务分析（{'双路' if self.enable_dual_path else '单路'}推理），"
+            f"模型: {self.complex_model}，温度: {temperatures}"
+        )
         
         system_prompt = prompt_components.system_prompt
         user_prompt = prompt_components.user_prompt
-        
-        temperatures = self.complex_temperatures if self.enable_dual_path else self.complex_temperatures[:1]
         
         # 并行执行各路推理，失败返回 None（不再用默认值混入 JSD 计算）
         async def call_with_temp(temp):
@@ -137,7 +138,7 @@ class LLMClient:
             # 全部路径失败：保留默认输出并强制低共识（权重 0.2）
             logger.warning("复杂任务全部推理路径失败，使用默认输出并标记为低共识")
             return DualPathResult(
-                output=default_llm_output(),
+                output=LLMOutput.default(),
                 consensus_level=ConsensusLevel.LOW,
                 jsd_score=1.0,
                 weight_multiplier=self.low_consensus_weight,
@@ -146,11 +147,13 @@ class LLMClient:
             )
         
         # 计算 JSD 和共识水平（仅基于成功路径）
-        jsd_score = self._calculate_jsd(outputs)
-        consensus_level = self._determine_consensus_level(jsd_score)
+        jsd_score = calculate_jsd(outputs)
+        consensus_level = determine_consensus_level(
+            jsd_score, self.jsd_threshold_low, self.jsd_threshold_medium
+        )
         
-        merged_output = self._merge_outputs(outputs, consensus_level)
-        weight_multiplier = self._calculate_weight_multiplier(consensus_level)
+        merged_output = merge_outputs(outputs, consensus_level)
+        weight_multiplier = calculate_weight_multiplier(consensus_level, self.low_consensus_weight)
         
         result = DualPathResult(
             output=merged_output,
@@ -173,7 +176,7 @@ class LLMClient:
         prompt_components: PromptComponents
     ) -> SentenceFunctionOutput:
         """单路推理，仅判断句类"""
-        logger.info("开始简单任务分析（单路推理）")
+        logger.info(f"开始简单任务分析（单路推理），模型: {self.simple_model}")
         
         try:
             output = await self._call_llm(
@@ -210,23 +213,3 @@ class LLMClient:
         complex_result.output.sentence_function = sentence_function
         
         return complex_result
-    
-    # ---- 共识算法委托（实现见 llm_consensus.py），保留实例方法签名兼容既有调用 ----
-    
-    def _calculate_jsd(self, outputs: List[Dict]) -> float:
-        return calculate_jsd(outputs)
-    
-    def _determine_consensus_level(self, jsd_score: float) -> ConsensusLevel:
-        return determine_consensus_level(jsd_score, self.jsd_threshold_low, self.jsd_threshold_medium)
-    
-    def _merge_outputs(self, outputs: List[Dict], consensus_level: ConsensusLevel) -> LLMOutput:
-        return merge_outputs(outputs, consensus_level)
-    
-    def _calculate_weight_multiplier(self, consensus_level: ConsensusLevel) -> float:
-        return calculate_weight_multiplier(consensus_level, self.low_consensus_weight)
-    
-    def _default_llm_output(self) -> LLMOutput:
-        return default_llm_output()
-    
-    def _dict_to_llm_output(self, data: Dict) -> LLMOutput:
-        return dict_to_llm_output(data)

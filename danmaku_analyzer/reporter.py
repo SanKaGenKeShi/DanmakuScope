@@ -17,6 +17,20 @@ from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# kappa_ready 中 LLM 输出字段解包映射：(CSV 列名, 维度键, 字段名, 默认值)
+_KAPPA_LLM_FIELDS = [
+    ("emotion_label", "emotion", "label", ""),
+    ("emotion_confidence", "emotion", "confidence", 0),
+    ("cooperative_principle_violated", "cooperative_principle", "violated", False),
+    ("cooperative_principle_maxim", "cooperative_principle", "maxim", ""),
+    ("interaction_type_label", "interaction_type", "label", ""),
+    ("interaction_type_confidence", "interaction_type", "confidence", 0),
+    ("sentence_function_label", "sentence_function", "label", ""),
+    ("sentence_function_confidence", "sentence_function", "confidence", 0),
+    ("orthography_status", "orthography", "status", ""),
+    ("orthography_confidence", "orthography", "confidence", 0),
+]
+
 
 class Reporter:
     
@@ -31,7 +45,7 @@ class Reporter:
         kappa_records: Optional[List[Dict]] = None,
         metadata: Optional[Dict] = None
     ) -> Dict[str, str]:
-        logger.info("开始生成报告")
+        logger.info(f"开始生成报告，共 {len(aggregated_data)} 个聚合组")
         
         reports = {}
         
@@ -51,50 +65,71 @@ class Reporter:
         logger.info(f"报告生成完成，共 {len(reports)} 个文件")
         return reports
     
-    async def generate_llm_analysis_report(
-        self,
-        aggregated_data: List[AggregatedData],
-        metadata: Optional[Dict] = None
-    ) -> Optional[str]:
+    async def _run_llm_report(self, generate_call, filename: str, label: str) -> Optional[str]:
+        """LLM 报告公共流程：启用检查 → 生成 → 落盘；失败/未启用返回 None"""
         if not self.settings.ENABLE_LLM_ANALYSIS_REPORT:
             logger.info("LLM分析报告生成未启用")
             return None
         
         try:
-            from .report_generator import AnalysisReportGenerator
-            
-            logger.info("开始生成LLM分析报告")
-            
-            report_gen = AnalysisReportGenerator()
-            
-            report_metadata = {
-                "bvid": metadata.get("bvid", "") if metadata else "",
-                "title": metadata.get("title", "") if metadata else "",
-                "tname": metadata.get("tname", "") if metadata else "",
-                "tags": metadata.get("tags", []) if metadata else [],
-            }
-            
-            aggregated_dicts = [data.to_flat_dict() for data in aggregated_data]
-            
-            report_content = await report_gen.generate(
-                aggregated_data=aggregated_dicts,
-                metadata=report_metadata
-            )
-            
+            report_content = await generate_call()
             if not report_content:
-                logger.error("LLM分析报告生成失败: 未获得有效报告内容")
+                logger.error(f"{label}生成失败: 未获得有效报告内容")
                 return None
             
-            filepath = os.path.join(self.output_dir, "sociolinguistic_analysis_report.md")
+            filepath = os.path.join(self.output_dir, filename)
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(report_content)
             
-            logger.info(f"LLM分析报告已保存: {filepath}")
+            logger.info(f"{label}已保存: {filepath}")
             return filepath
             
         except Exception as e:
-            logger.error(f"LLM分析报告生成失败: {e}")
+            logger.error(f"{label}生成失败: {e}")
             return None
+    
+    async def generate_llm_analysis_report(
+        self,
+        aggregated_data: List[AggregatedData],
+        metadata: Optional[Dict] = None
+    ) -> Optional[str]:
+        from .report_generator import AnalysisReportGenerator
+        
+        report_gen = AnalysisReportGenerator()
+        report_metadata = {
+            "bvid": metadata.get("bvid", "") if metadata else "",
+            "title": metadata.get("title", "") if metadata else "",
+            "tname": metadata.get("tname", "") if metadata else "",
+            "tags": metadata.get("tags", []) if metadata else [],
+        }
+        aggregated_dicts = [data.to_flat_dict() for data in aggregated_data]
+        
+        return await self._run_llm_report(
+            lambda: report_gen.generate(aggregated_data=aggregated_dicts, metadata=report_metadata),
+            "sociolinguistic_analysis_report.md", "LLM分析报告"
+        )
+    
+    async def generate_corpus_analysis_report(
+        self,
+        summary_csv_path: str,
+        videos_csv_path: str,
+        corpus_metadata: Dict,
+    ) -> Optional[str]:
+        """语料库级 LLM 比较分析报告（与单视频报告共用同一生成入口）"""
+        from .report_generator import AnalysisReportGenerator
+        
+        report_gen = AnalysisReportGenerator()
+        return await self._run_llm_report(
+            lambda: report_gen.generate_corpus_report(summary_csv_path, videos_csv_path, corpus_metadata),
+            "corpus_analysis_report.md", "语料库LLM分析报告"
+        )
+    
+    def _write_dataframe(self, rows: List[Dict], filename: str, description: str) -> str:
+        df = pd.DataFrame(rows)
+        filepath = os.path.join(self.output_dir, filename)
+        df.to_csv(filepath, index=False, encoding='utf-8-sig')
+        logger.info(f"{description}已保存: {filepath}")
+        return filepath
     
     def _generate_lexical_table(self, data: List[AggregatedData]) -> str:
         rows = []
@@ -114,12 +149,7 @@ class Reporter:
             
             rows.append(row)
         
-        df = pd.DataFrame(rows)
-        filepath = os.path.join(self.output_dir, "table_lexical_by_partition.csv")
-        df.to_csv(filepath, index=False, encoding='utf-8-sig')
-        
-        logger.info(f"词类统计表已保存: {filepath}")
-        return filepath
+        return self._write_dataframe(rows, "table_lexical_by_partition.csv", "词类统计表")
     
     def _generate_orthography_table(self, data: List[AggregatedData]) -> str:
         rows = []
@@ -136,12 +166,7 @@ class Reporter:
             
             rows.append(row)
         
-        df = pd.DataFrame(rows)
-        filepath = os.path.join(self.output_dir, "table_orthography.csv")
-        df.to_csv(filepath, index=False, encoding='utf-8-sig')
-        
-        logger.info(f"正字法统计表已保存: {filepath}")
-        return filepath
+        return self._write_dataframe(rows, "table_orthography.csv", "正字法统计表")
     
     def _generate_sentence_function_table(self, data: List[AggregatedData]) -> str:
         rows = []
@@ -156,12 +181,7 @@ class Reporter:
             
             rows.append(row)
         
-        df = pd.DataFrame(rows)
-        filepath = os.path.join(self.output_dir, "table_sentence_function.csv")
-        df.to_csv(filepath, index=False, encoding='utf-8-sig')
-        
-        logger.info(f"句类分布表已保存: {filepath}")
-        return filepath
+        return self._write_dataframe(rows, "table_sentence_function.csv", "句类分布表")
     
     def _generate_emotion_table(self, data: List[AggregatedData]) -> str:
         rows = []
@@ -170,18 +190,14 @@ class Reporter:
                 "tname": item.tname,
                 "zone_type": item.zone_type,
                 "danmaku_count": item.danmaku_count,
+                "cooperative_principle_violation_rate": item.cooperative_principle_violation_rate,
             }
             for emotion, ratio in item.emotion_distribution.items():
                 row[emotion] = ratio
             
             rows.append(row)
         
-        df = pd.DataFrame(rows)
-        filepath = os.path.join(self.output_dir, "table_emotion.csv")
-        df.to_csv(filepath, index=False, encoding='utf-8-sig')
-        
-        logger.info(f"情感分布表已保存: {filepath}")
-        return filepath
+        return self._write_dataframe(rows, "table_emotion.csv", "情感分布表")
     
     def _generate_interaction_type_table(self, data: List[AggregatedData]) -> str:
         rows = []
@@ -196,12 +212,7 @@ class Reporter:
             
             rows.append(row)
         
-        df = pd.DataFrame(rows)
-        filepath = os.path.join(self.output_dir, "table_interaction_type.csv")
-        df.to_csv(filepath, index=False, encoding='utf-8-sig')
-        
-        logger.info(f"互动类型分布表已保存: {filepath}")
-        return filepath
+        return self._write_dataframe(rows, "table_interaction_type.csv", "互动类型分布表")
     
     def _generate_consensus_table(self, data: List[AggregatedData]) -> str:
         rows = []
@@ -221,12 +232,7 @@ class Reporter:
             }
             rows.append(row)
         
-        df = pd.DataFrame(rows)
-        filepath = os.path.join(self.output_dir, "table_consensus_stats.csv")
-        df.to_csv(filepath, index=False, encoding='utf-8-sig')
-        
-        logger.info(f"共识统计表已保存: {filepath}")
-        return filepath
+        return self._write_dataframe(rows, "table_consensus_stats.csv", "共识统计表")
     
     def _generate_heatmap_data(self, data: List[AggregatedData]) -> str:
         heatmap_data = {
@@ -285,16 +291,8 @@ class Reporter:
                 }
                 
                 llm_output = record.get("llm_output", {})
-                row["emotion_label"] = llm_output.get("emotion", {}).get("label", "")
-                row["emotion_confidence"] = llm_output.get("emotion", {}).get("confidence", 0)
-                row["cooperative_principle_violated"] = llm_output.get("cooperative_principle", {}).get("violated", False)
-                row["cooperative_principle_maxim"] = llm_output.get("cooperative_principle", {}).get("maxim", "")
-                row["interaction_type_label"] = llm_output.get("interaction_type", {}).get("label", "")
-                row["interaction_type_confidence"] = llm_output.get("interaction_type", {}).get("confidence", 0)
-                row["sentence_function_label"] = llm_output.get("sentence_function", {}).get("label", "")
-                row["sentence_function_confidence"] = llm_output.get("sentence_function", {}).get("confidence", 0)
-                row["orthography_status"] = llm_output.get("orthography", {}).get("status", "")
-                row["orthography_confidence"] = llm_output.get("orthography", {}).get("confidence", 0)
+                for csv_field, dim_key, field_name, default in _KAPPA_LLM_FIELDS:
+                    row[csv_field] = llm_output.get(dim_key, {}).get(field_name, default)
                 
                 writer.writerow(row)
         

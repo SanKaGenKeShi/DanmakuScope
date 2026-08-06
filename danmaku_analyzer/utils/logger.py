@@ -52,6 +52,3 @@ def setup_logger(
 def get_logger(name: str) -> Logger:
     """获取绑定模块名的日志记录器"""
     return logger.bind(name=name)
-
-
-setup_logger()

@@ -161,7 +161,6 @@ async def _batch_async(
 @click.option('--with-r', is_flag=True, default=False, help='同时生成 R 可视化脚本模板（corpus_plots.R）')
 def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_r: bool):
     """跨视频语料库级聚合（回读单视频 ZIP 报告，按分区输出比较表并打包快照）"""
-    from .config import get_settings
     from .corpus_builder import CorpusBuilder
 
     if not from_index and not zip_list:
@@ -207,18 +206,12 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_r: boo
 
 async def _generate_corpus_llm_report(builder, result) -> Optional[str]:
     """生成语料库级 LLM 比较分析报告并落盘，返回文件路径（失败返回 None）"""
-    from .report_generator import AnalysisReportGenerator
+    from .reporter import Reporter
 
     corpus_metadata = builder.build_snapshot_metadata(result)
-    content = await AnalysisReportGenerator().generate_corpus_report(
+    return await Reporter(output_dir=result.output_dir).generate_corpus_analysis_report(
         result.csv_path, result.videos_csv_path, corpus_metadata
     )
-    if not content:
-        return None
-    report_path = os.path.join(result.output_dir, "corpus_analysis_report.md")
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write(content)
-    return report_path
 
 
 @cli.command()

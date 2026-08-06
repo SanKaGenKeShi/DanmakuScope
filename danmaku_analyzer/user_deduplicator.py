@@ -3,7 +3,7 @@
 unknown_device 标记为 "unknown_device"，排除在去重之外，但计入总量
 """
 
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from dataclasses import dataclass
 from collections import defaultdict
 
@@ -87,6 +87,3 @@ class UserDeduplicator:
         )
         
         return result
-    
-    def deduplicate_batch(self, danmaku_lists: List[List[DanmakuItem]]) -> List[DeduplicationResult]:
-        return [self.deduplicate(dl) for dl in danmaku_lists]

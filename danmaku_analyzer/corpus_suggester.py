@@ -8,6 +8,7 @@
 import html
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Optional, Set
 
 from .config import get_settings
@@ -133,8 +134,6 @@ class CorpusSuggester:
     @staticmethod
     def _parse_results(raw: dict, existing: Set[str], limit: int) -> List[CandidateVideo]:
         """搜索结果 → CandidateVideo：剔除已收录、按弹幕数降序、取前 limit 个"""
-        from datetime import datetime
-
         candidates = []
         for item in raw.get("result") or []:
             bvid = item.get("bvid") or ""

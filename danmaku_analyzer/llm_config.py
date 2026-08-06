@@ -8,6 +8,14 @@ from typing import List, Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
+# 两个 Settings 类共用的 .env 加载配置（单一定义，避免两处漂移）
+SETTINGS_MODEL_CONFIG = {
+    "env_file": os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    "env_file_encoding": "utf-8",
+    "case_sensitive": True,
+    "extra": "ignore",
+}
+
 
 class LLMSettings(BaseSettings):
     """LLM 配置中心，从环境变量或 .env 文件加载 LLM 配置"""
@@ -71,12 +79,12 @@ class LLMSettings(BaseSettings):
         description="是否启用双路推理"
     )
     JSD_THRESHOLD_LOW: float = Field(
-        default=0.15, 
-        description="JSD 低阈值"
+        default=0.2, 
+        description="JSD 低阈值（归一化后相对散度，1.0=完全分歧）"
     )
     JSD_THRESHOLD_MEDIUM: float = Field(
-        default=0.4, 
-        description="JSD 中阈值"
+        default=0.6, 
+        description="JSD 中阈值（归一化后相对散度，1.0=完全分歧）"
     )
     LOW_CONSENSUS_WEIGHT: float = Field(
         default=0.2, 
@@ -93,12 +101,7 @@ class LLMSettings(BaseSettings):
         description="Prompt 版本"
     )
     
-    model_config = {
-        "env_file": os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
-        "env_file_encoding": "utf-8",
-        "case_sensitive": True,
-        "extra": "ignore",
-    }
+    model_config = SETTINGS_MODEL_CONFIG
     
     @property
     def effective_analysis_report_base_url(self) -> str:

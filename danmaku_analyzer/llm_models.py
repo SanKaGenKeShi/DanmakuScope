@@ -2,9 +2,9 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Dict, Literal
+from typing import List, Dict, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class EmotionOutput(BaseModel):
@@ -14,9 +14,16 @@ class EmotionOutput(BaseModel):
 
 
 class CooperativePrincipleOutput(BaseModel):
-    """合作原则输出"""
+    """合作原则输出；maxim 仅在 violated=True 时有意义，未违反时为 None"""
     violated: bool = False
-    maxim: Literal["quality", "quantity", "relation", "manner"] = "quality"
+    maxim: Optional[Literal["quality", "quantity", "relation", "manner"]] = None
+
+    @model_validator(mode="after")
+    def _normalize_maxim(self):
+        # 模型在未违反时仍会按 Prompt 约定填充 maxim 占位值，此处统一归一化
+        if not self.violated:
+            self.maxim = None
+        return self
 
 
 class InteractionTypeOutput(BaseModel):
@@ -39,9 +46,9 @@ class OrthographyOutput(BaseModel):
 
 class ConsensusLevel(Enum):
     """共识水平"""
-    HIGH = "high"  # JSD < 0.15
-    MEDIUM = "medium"  # 0.15 <= JSD < 0.4
-    LOW = "low"  # JSD >= 0.4
+    HIGH = "high"  # 归一化 JSD < JSD_THRESHOLD_LOW
+    MEDIUM = "medium"  # JSD_THRESHOLD_LOW <= 归一化 JSD < JSD_THRESHOLD_MEDIUM
+    LOW = "low"  # 归一化 JSD >= JSD_THRESHOLD_MEDIUM
 
 
 @dataclass
@@ -62,6 +69,28 @@ class LLMOutput:
             "orthography": self.orthography.model_dump(),
         }
 
+    @classmethod
+    def default(cls) -> "LLMOutput":
+        """全默认输出（推理失败兜底）"""
+        return cls(
+            emotion=EmotionOutput(),
+            cooperative_principle=CooperativePrincipleOutput(),
+            interaction_type=InteractionTypeOutput(),
+            sentence_function=SentenceFunctionOutput(),
+            orthography=OrthographyOutput(),
+        )
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "LLMOutput":
+        """dict → 类型化 LLMOutput（容错）"""
+        return cls(
+            emotion=EmotionOutput.model_validate(data.get("emotion", {})),
+            cooperative_principle=CooperativePrincipleOutput.model_validate(data.get("cooperative_principle", {})),
+            interaction_type=InteractionTypeOutput.model_validate(data.get("interaction_type", {})),
+            sentence_function=SentenceFunctionOutput.model_validate(data.get("sentence_function", {})),
+            orthography=OrthographyOutput.model_validate(data.get("orthography", {})),
+        )
+
 
 @dataclass
 class DualPathResult:
@@ -81,25 +110,3 @@ class DualPathResult:
             "weight_multiplier": self.weight_multiplier,
             "prompt_version": self.prompt_version,
         }
-
-
-def default_llm_output() -> LLMOutput:
-    """全默认输出（推理失败兜底）"""
-    return LLMOutput(
-        emotion=EmotionOutput(),
-        cooperative_principle=CooperativePrincipleOutput(),
-        interaction_type=InteractionTypeOutput(),
-        sentence_function=SentenceFunctionOutput(),
-        orthography=OrthographyOutput(),
-    )
-
-
-def dict_to_llm_output(data: Dict) -> LLMOutput:
-    """dict → 类型化 LLMOutput（容错）"""
-    return LLMOutput(
-        emotion=EmotionOutput.model_validate(data.get("emotion", {})),
-        cooperative_principle=CooperativePrincipleOutput.model_validate(data.get("cooperative_principle", {})),
-        interaction_type=InteractionTypeOutput.model_validate(data.get("interaction_type", {})),
-        sentence_function=SentenceFunctionOutput.model_validate(data.get("sentence_function", {})),
-        orthography=OrthographyOutput.model_validate(data.get("orthography", {})),
-    )

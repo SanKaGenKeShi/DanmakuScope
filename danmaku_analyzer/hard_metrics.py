@@ -1,15 +1,15 @@
 """
 硬统计模块 - 纯硬统计分析（无句类判断，无硬错别字匹配）
 包含词类、密度、变体正则等统计指标
-支持 jieba+HMM 和 LLM 辅助分词两种模式
+支持 jieba+HMM 和 LLM 辅助分词两种模式：LLM 分词仅限异步入口 analyze_async
 """
 
 import os
 import json
+import asyncio
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 
 import jieba
 import jieba.posseg as pseg
@@ -57,16 +57,17 @@ class HardMetricsAnalyzer:
         
         self.enable_llm_tokenizer = self.settings.ENABLE_LLM_TOKENIZER
         self.llm_tokenizer_min_length = self.settings.LLM_TOKENIZER_MIN_LENGTH
-        self.llm_tokenizer_concurrency = self.settings.LLM_TOKENIZER_CONCURRENCY
-        
+
         self.llm_client = None
         if self.enable_llm_tokenizer:
             from .llm_config import get_llm_settings
-            from .llm_factory import simple_sync_client
+            from .llm_factory import simple_async_client
             llm_cfg = get_llm_settings()
-            self.llm_client = simple_sync_client(timeout=30.0)
+            self.llm_client = simple_async_client(timeout=30.0)
             self.llm_model = llm_cfg.SIMPLE_LLM_MODEL
             self.enable_thinking = llm_cfg.ENABLE_THINKING
+            # 与主链路共用同一并发上限，所有 LLM 调用统一经此信号量限速
+            self.llm_semaphore = asyncio.Semaphore(self.settings.LLM_CONCURRENCY)
             logger.info(f"LLM 分词已启用，模型: {self.llm_model}，最小触发长度: {self.llm_tokenizer_min_length}")
     
     def _load_lexicons(self):
@@ -85,8 +86,8 @@ class HardMetricsAnalyzer:
                 except Exception as e:
                     logger.error(f"加载词典失败 {filename}: {e}")
     
-    def _tokenize_batch(self, danmaku_list: List[str]) -> List[List[Tuple[str, str]]]:
-        """批量分词：长文本并发走 LLM 分词（单条失败各自回退 jieba），其余直接 jieba"""
+    async def _tokenize_batch_async(self, danmaku_list: List[str]) -> List[List[Tuple[str, str]]]:
+        """批量分词：长文本并发走 LLM 分词（信号量限速，单条失败各自回退 jieba），其余直接 jieba"""
         results: List[Optional[List[Tuple[str, str]]]] = [None] * len(danmaku_list)
         llm_indices = []
         for i, text in enumerate(danmaku_list):
@@ -96,25 +97,22 @@ class HardMetricsAnalyzer:
                 llm_indices.append(i)
             else:
                 results[i] = list(pseg.cut(text))
-        
+
         if llm_indices:
-            texts = [danmaku_list[i] for i in llm_indices]
-            max_workers = min(self.llm_tokenizer_concurrency, len(texts))
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                llm_results = list(pool.map(self._llm_tokenize_safe, texts))
-            for i, tokens in zip(llm_indices, llm_results):
+            tasks = [self._llm_tokenize_safe(danmaku_list[i]) for i in llm_indices]
+            for i, tokens in zip(llm_indices, await asyncio.gather(*tasks)):
                 results[i] = tokens
-        
+
         return results  # type: ignore[return-value]
-    
-    def _llm_tokenize_safe(self, text: str) -> List[Tuple[str, str]]:
+
+    async def _llm_tokenize_safe(self, text: str) -> List[Tuple[str, str]]:
         try:
-            return self._llm_tokenize(text)
+            return await self._llm_tokenize(text)
         except Exception as e:
             logger.warning(f"LLM 分词失败，回退到 jieba: {e}")
             return list(pseg.cut(text))
-    
-    def _llm_tokenize(self, text: str) -> List[Tuple[str, str]]:
+
+    async def _llm_tokenize(self, text: str) -> List[Tuple[str, str]]:
         prompt = f"""请对以下中文文本进行分词和词性标注。
 
 词性标注规范：
@@ -143,7 +141,8 @@ class HardMetricsAnalyzer:
                 "temperature": 0.0,
                 "extra_body": {"enable_thinking": self.enable_thinking},
             }
-            response = self.llm_client.chat.completions.create(**kwargs)
+            async with self.llm_semaphore:
+                response = await self.llm_client.chat.completions.create(**kwargs)
             
             content = response.choices[0].message.content.strip()
             
@@ -162,28 +161,50 @@ class HardMetricsAnalyzer:
             raise
     
     def analyze(self, danmaku_list: List[str]) -> HardMetricsResult:
+        """同步入口：纯 jieba 分词（LLM 分词仅在异步入口 analyze_async 生效）"""
         if not danmaku_list:
             return self._empty_result()
-        
+
         logger.info(f"开始硬统计分析，共 {len(danmaku_list)} 条弹幕")
-        
+        tokenized_list = [list(pseg.cut(text)) for text in danmaku_list]
+        return self._compute_stats(danmaku_list, tokenized_list)
+
+    async def analyze_async(self, danmaku_list: List[str]) -> HardMetricsResult:
+        """异步入口：LLM 分词经 asyncio.Semaphore 限速；未触发 LLM 时委托 executor 执行纯 CPU 统计"""
+        if not danmaku_list:
+            return self._empty_result()
+
+        logger.info(f"开始硬统计分析，共 {len(danmaku_list)} 条弹幕")
+        if not (self.enable_llm_tokenizer and self.llm_client is not None):
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: self._compute_stats(
+                    danmaku_list, [list(pseg.cut(text)) for text in danmaku_list]
+                )
+            )
+        tokenized_list = await self._tokenize_batch_async(danmaku_list)
+        return self._compute_stats(danmaku_list, tokenized_list)
+
+    def _compute_stats(
+        self,
+        danmaku_list: List[str],
+        tokenized_list: List[List[Tuple[str, str]]],
+    ) -> HardMetricsResult:
         pos_counter = Counter()
         syllable_counter = Counter()
         total_words = 0
         total_chars = 0
         punctuation_emoji_count = 0
-        
+
         uppercase_abbr_count = 0
         number_symbol_count = 0
         emoticon_count = 0
-        
+
         uppercase_pattern = regex.compile(r'[A-Z]{2,}')
         number_pattern = regex.compile(r'\d{2,}')
         emoticon_pattern = regex.compile(r'[（(][\u4e00-\u9fff\w\s・ω･｡]+[）)]')
         punctuation_pattern = regex.compile(r'[!?~！？～]')
-        
-        tokenized_list = self._tokenize_batch(danmaku_list)
-        
+
         for danmaku, words in zip(danmaku_list, tokenized_list):
             has_punctuation = bool(punctuation_pattern.search(danmaku))
             has_emoji = bool(emoji.emoji_count(danmaku) > 0)

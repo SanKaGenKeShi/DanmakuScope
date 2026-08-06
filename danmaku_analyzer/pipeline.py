@@ -11,7 +11,7 @@ import functools
 import os
 import zipfile
 from collections import Counter
-from typing import List, Optional, Callable
+from typing import List, Dict, Optional, Callable
 from dataclasses import dataclass, field
 
 from .config import get_settings, Settings
@@ -28,6 +28,7 @@ from .aggregator import Aggregator, DanmakuRecord, AggregatedData
 from .reporter import Reporter
 from .statistical_validator import StatisticalValidator
 from .cache_manager import get_cache_manager
+from .corpus_builder import validate_zip_archive
 from .utils.input_parser import InputParser, InputType
 from .utils.logger import get_logger
 
@@ -235,17 +236,14 @@ async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOption
     prompt_builder = PromptBuilder()
     llm_client = LLMClient()
     llm_semaphore = asyncio.Semaphore(settings.LLM_CONCURRENCY)
-    loop = asyncio.get_running_loop()
 
-    # 各段弹幕预计算，硬统计任务一次性全部提交（段间并行，CPU 密集走 executor）
+    # 各段弹幕预计算，硬统计任务一次性全部提交（LLM 分词由内部信号量限速，纯 jieba 时委托 executor）
     segment_danmaku_lists = [
         [dedup_result.deduplicated_danmaku[idx] for idx in seg.danmaku_indices]
         for seg in segments
     ]
     hard_metrics_list = await asyncio.gather(*[
-        loop.run_in_executor(
-            None, functools.partial(hard_analyzer.analyze, [d.content for d in seg_dms])
-        )
+        hard_analyzer.analyze_async([d.content for d in seg_dms])
         for seg_dms in segment_danmaku_lists
     ])
 
@@ -337,6 +335,58 @@ async def _stage_aggregate(
     return aggregated
 
 
+# Windows/通用文件系统文件名非法字符
+_UNSAFE_FILENAME_CHARS = '/\\:*?"<>|'
+
+
+def _sanitize_zip_filename(title: str) -> str:
+    return title.translate({ord(c): "_" for c in _UNSAFE_FILENAME_CHARS})
+
+
+def _build_kappa_records(analysis: SegmentAnalysisOutput) -> List[Dict]:
+    """构建 kappa_ready 记录（records 与样本已在阶段 4 同步过滤，一一对应）"""
+    records = []
+    for record, danmaku, seg in zip(analysis.records, analysis.sample_danmaku, analysis.sample_segments):
+        records.append({
+            "uid_hash": danmaku.uid_hash,
+            "time_segment": f"{seg.start_time:.1f}-{seg.end_time:.1f}",
+            "raw_text": danmaku.content,
+            "tname": record.tname,
+            "zone_type": record.zone_type,
+            "consensus_level": record.llm_result.consensus_level.value,
+            "weight_multiplier": record.llm_result.weight_multiplier,
+            "llm_output": record.llm_result.output.to_dict(),
+        })
+    return records
+
+
+def _package_reports_zip(reports: dict, zip_path: str, progress: ProgressCallback) -> bool:
+    """ZIP 打包 + 完整性校验；校验通过后清理散落源文件"""
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for name, path in reports.items():
+            if os.path.exists(path):
+                zipf.write(path, os.path.basename(path))
+
+    zip_valid = validate_zip_archive(
+        zip_path,
+        sum(1 for path in reports.values() if os.path.exists(path)),
+    )
+    zip_filename = os.path.basename(zip_path)
+    if zip_valid:
+        deleted_count = 0
+        for name, path in reports.items():
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                    deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"删除失败: {os.path.basename(path)} - {e}")
+        progress("报告打包", f"打包完成: {zip_filename} (已删除{deleted_count}个源文件)")
+    else:
+        progress("报告打包", f"打包完成: {zip_filename} (源文件保留)")
+    return zip_valid
+
+
 async def _stage_report(
     bvid: str,
     crawl: CrawlOutput,
@@ -352,20 +402,6 @@ async def _stage_report(
     progress("报告生成", "正在生成报告...")
     reporter = Reporter(output_dir=options.use_output_dir)
 
-    # 构建 kappa_ready 记录（records 与样本已在阶段 4 同步过滤，一一对应）
-    kappa_records = []
-    for record, danmaku, seg in zip(analysis.records, analysis.sample_danmaku, analysis.sample_segments):
-        kappa_records.append({
-            "uid_hash": danmaku.uid_hash,
-            "time_segment": f"{seg.start_time:.1f}-{seg.end_time:.1f}",
-            "raw_text": danmaku.content,
-            "tname": record.tname,
-            "zone_type": record.zone_type,
-            "consensus_level": record.llm_result.consensus_level.value,
-            "weight_multiplier": record.llm_result.weight_multiplier,
-            "llm_output": record.llm_result.output.to_dict(),
-        })
-
     video_metadata = {
         "bvid": bvid, "title": crawl.meta.title,
         "tname": pre.social_vars.tname, "tags": pre.social_vars.tags,
@@ -374,7 +410,9 @@ async def _stage_report(
         "danmaku_count": len(crawl.danmaku_list),
         "pipeline_version": __version__,
     }
-    reports = reporter.generate_reports(aggregated, kappa_records=kappa_records, metadata=video_metadata)
+    reports = reporter.generate_reports(
+        aggregated, kappa_records=_build_kappa_records(analysis), metadata=video_metadata
+    )
     progress("报告生成", "报告生成完成")
 
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
@@ -387,43 +425,8 @@ async def _stage_report(
             progress("LLM报告", "LLM分析报告生成失败或未启用")
 
     progress("报告打包", "正在打包报告...")
-    safe_title = crawl.meta.title.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
-    zip_filename = f"[{bvid}]{safe_title}.zip"
+    zip_filename = f"[{bvid}]{_sanitize_zip_filename(crawl.meta.title)}.zip"
     zip_path = os.path.join(options.use_output_dir, zip_filename)
-
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for name, path in reports.items():
-            if os.path.exists(path):
-                zipf.write(path, os.path.basename(path))
-
-    zip_valid = _validate_zip(zip_path, reports)
-    if zip_valid:
-        deleted_count = 0
-        for name, path in reports.items():
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                    deleted_count += 1
-                except Exception as e:
-                    logger.warning(f"删除失败: {os.path.basename(path)} - {e}")
-        progress("报告打包", f"打包完成: {zip_filename} (已删除{deleted_count}个源文件)")
-    else:
-        progress("报告打包", f"打包完成: {zip_filename} (源文件保留)")
+    zip_valid = _package_reports_zip(reports, zip_path, progress)
 
     return ReportOutput(reports=reports, zip_path=zip_path, zip_valid=zip_valid)
-
-
-def _validate_zip(zip_path: str, reports: dict) -> bool:
-    if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
-        return False
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zipf:
-            file_list = zipf.namelist()
-            expected_count = sum(1 for path in reports.values() if os.path.exists(path))
-            if len(file_list) != expected_count:
-                return False
-            if file_list:
-                zipf.read(file_list[0])
-            return True
-    except Exception:
-        return False

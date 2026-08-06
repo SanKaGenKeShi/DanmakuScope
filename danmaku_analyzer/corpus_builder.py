@@ -16,6 +16,7 @@ import pandas as pd
 
 from . import __version__
 from .config import get_settings
+from .corpus_store import CorpusStore
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,7 +27,7 @@ METADATA_FILENAME = "metadata.json"
 TABLE_SPECS = {
     "table_lexical_by_partition.csv": ["avg_word_length", "content_word_density", "punctuation_emoji_rate"],
     "table_consensus_stats.csv": ["high_consensus_rate", "medium_consensus_rate", "low_consensus_rate", "avg_weight_multiplier"],
-    "table_emotion.csv": [],
+    "table_emotion.csv": ["cooperative_principle_violation_rate"],
     "table_sentence_function.csv": [],
     "table_interaction_type.csv": [],
 }
@@ -36,8 +37,24 @@ NON_DIST_COLUMNS = {"tname", "zone_type", "danmaku_count"}
 SCALAR_FIELDS = [
     "avg_word_length", "content_word_density", "punctuation_emoji_rate",
     "high_consensus_rate", "medium_consensus_rate", "low_consensus_rate",
-    "avg_weight_multiplier",
+    "avg_weight_multiplier", "cooperative_principle_violation_rate",
 ]
+
+
+def validate_zip_archive(zip_path: str, expected_count: int) -> bool:
+    """ZIP 完整性校验：存在非空 + 条目数一致 + 首个条目可读"""
+    if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+        return False
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            names = zipf.namelist()
+            if len(names) != expected_count:
+                return False
+            if names:
+                zipf.read(names[0])
+            return True
+    except Exception:
+        return False
 
 
 @dataclass
@@ -69,8 +86,6 @@ class CorpusBuilder:
 
     def build_from_zips(self, zip_paths: List[str], output_dir: Optional[str] = None) -> CorpusBuildResult:
         """回读多个 ZIP → 登记索引 → 聚合输出语料库级 CSV，返回构建结果"""
-        from .corpus_store import CorpusStore
-
         store = CorpusStore()
         summaries: List[VideoSummary] = []
         readable_zips: List[str] = []
@@ -94,8 +109,6 @@ class CorpusBuilder:
 
     def build_from_index(self, output_dir: Optional[str] = None) -> CorpusBuildResult:
         """从语料库索引登记的全部视频聚合"""
-        from .corpus_store import CorpusStore
-
         store = CorpusStore()
         summaries: List[VideoSummary] = []
         readable_zips: List[str] = []
@@ -222,6 +235,26 @@ class CorpusBuilder:
 
         self._check_prompt_versions(summaries)
 
+        rows, warnings = self._aggregate_groups(summaries)
+
+        settings = get_settings()
+        out_dir = settings.resolve_data_path(output_dir or settings.OUTPUT_DIR)
+        os.makedirs(out_dir, exist_ok=True)
+        filepath = self._write_summary_table(rows, summaries, out_dir)
+
+        # 视频级观测表：KW/Dunn 等检验的原始观测来源（组级 mean/std 无法还原个体值）
+        videos_path = os.path.join(out_dir, "corpus_videos.csv")
+        self._write_video_observations(summaries, videos_path)
+        return CorpusBuildResult(
+            csv_path=filepath,
+            videos_csv_path=videos_path,
+            source_zip_paths=list(source_zip_paths or []),
+            output_dir=out_dir,
+            warnings=warnings,
+        )
+
+    def _aggregate_groups(self, summaries: List[VideoSummary]) -> Tuple[List[Dict], List[str]]:
+        """按分区/时段/冷热区分组聚合，返回（组级行, 样本量告警）"""
         settings = get_settings()
         temporal = settings.ENABLE_TEMPORAL_GROUPING
         granularity = settings.TEMPORAL_GRANULARITY
@@ -241,24 +274,13 @@ class CorpusBuilder:
                 logger.warning(msg)
                 warnings.append(msg)
             rows.append(self._aggregate_group(tname, time_period, zone_type, items))
+        return rows, warnings
 
-        df = pd.DataFrame(rows)
-        out_dir = settings.resolve_data_path(output_dir or settings.OUTPUT_DIR)
-        os.makedirs(out_dir, exist_ok=True)
+    def _write_summary_table(self, rows: List[Dict], summaries: List[VideoSummary], out_dir: str) -> str:
         filepath = os.path.join(out_dir, "corpus_summary.csv")
-        df.to_csv(filepath, index=False, encoding='utf-8-sig')
+        pd.DataFrame(rows).to_csv(filepath, index=False, encoding='utf-8-sig')
         logger.info(f"语料库聚合表已保存: {filepath}（{len(rows)} 组，{len(summaries)} 个视频观测）")
-
-        # 视频级观测表：KW/Dunn 等检验的原始观测来源（组级 mean/std 无法还原个体值）
-        videos_path = os.path.join(out_dir, "corpus_videos.csv")
-        self._write_video_observations(summaries, videos_path)
-        return CorpusBuildResult(
-            csv_path=filepath,
-            videos_csv_path=videos_path,
-            source_zip_paths=list(source_zip_paths or []),
-            output_dir=out_dir,
-            warnings=warnings,
-        )
+        return filepath
 
     def package_snapshot(
         self,
@@ -307,7 +329,7 @@ class CorpusBuilder:
             return zip_path
 
         expected_count = sum(1 for p in loose_files if os.path.exists(p)) + len(source_entries)
-        if self._validate_snapshot(zip_path, expected_count):
+        if validate_zip_archive(zip_path, expected_count):
             result.zip_path = zip_path
             result.zip_valid = True
             deleted = 0
@@ -338,21 +360,6 @@ class CorpusBuilder:
             "prompt_versions": self._read_prompt_versions(result.videos_csv_path),
             "warnings": result.warnings,
         }
-
-    @staticmethod
-    def _validate_snapshot(zip_path: str, expected_count: int) -> bool:
-        if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
-            return False
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zipf:
-                names = zipf.namelist()
-                if len(names) != expected_count:
-                    return False
-                if names:
-                    zipf.read(names[0])
-                return True
-        except Exception:
-            return False
 
     @staticmethod
     def _read_bvids(videos_csv_path: str) -> List[str]:

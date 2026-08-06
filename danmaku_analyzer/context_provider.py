@@ -87,14 +87,6 @@ class ContextProvider:
         
         return context
     
-    def get_context_batch(
-        self, 
-        target_danmaku_list: List[DanmakuItem], 
-        segment: TimeSegment,
-        segment_danmaku_list: List[DanmakuItem]
-    ) -> List[ContextWindow]:
-        return [self.get_context(t, segment, segment_danmaku_list) for t in target_danmaku_list]
-    
     def _apply_token_limit(
         self, 
         before_context: List[DanmakuItem], 

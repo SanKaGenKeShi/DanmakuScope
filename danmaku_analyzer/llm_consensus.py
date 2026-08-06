@@ -4,14 +4,14 @@ from typing import List, Dict, Optional
 
 import numpy as np
 
-from .llm_models import ConsensusLevel, LLMOutput, default_llm_output, dict_to_llm_output
+from .llm_models import ConsensusLevel, LLMOutput
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 def calculate_jsd(outputs: List[Dict]) -> float:
-    """多维共识度量：情感/互动类型/正字法/合作原则各维 JSD 的均值"""
+    """多维共识度量：各维 JSD 按 ln(n) 归一化到 [0,1] 后取均值，消除类别数差异导致的主导偏差"""
     if len(outputs) < 2:
         return 0.0
     
@@ -32,7 +32,7 @@ def calculate_jsd(outputs: List[Dict]) -> float:
                 )
                 for output in outputs
             ]
-            jsd_scores.append(jsd_of(distributions))
+            jsd_scores.append(_normalized_jsd(distributions))
         
         # 合作原则无 confidence 字段，按 violated 二元确定性分布参与度量
         cp_distributions = [
@@ -40,7 +40,7 @@ def calculate_jsd(outputs: List[Dict]) -> float:
             else np.array([0.0, 1.0])
             for output in outputs
         ]
-        jsd_scores.append(jsd_of(cp_distributions))
+        jsd_scores.append(_normalized_jsd(cp_distributions))
         
         return float(np.mean(jsd_scores))
         
@@ -63,7 +63,7 @@ def categorical_distribution(label: Optional[str], confidence: float, labels: Li
     return dist
 
 
-def jsd_of(distributions: List[np.ndarray]) -> float:
+def _jsd_of(distributions: List[np.ndarray]) -> float:
     # epsilon 平滑避免零概率除零
     eps = 1e-10
     distributions = [d + eps for d in distributions]
@@ -79,6 +79,14 @@ def jsd_of(distributions: List[np.ndarray]) -> float:
     return float(jsd)
 
 
+def _normalized_jsd(distributions: List[np.ndarray]) -> float:
+    """JSD 除以其理论上限 ln(m)（m 为分布数，支撑集互斥时取到），映射到 [0,1] 使各维可比"""
+    max_jsd = np.log(len(distributions))
+    if max_jsd <= 0:
+        return 0.0
+    return float(_jsd_of(distributions) / max_jsd)
+
+
 def determine_consensus_level(jsd_score: float, threshold_low: float, threshold_medium: float) -> ConsensusLevel:
     if jsd_score < threshold_low:
         return ConsensusLevel.HIGH
@@ -91,10 +99,10 @@ def determine_consensus_level(jsd_score: float, threshold_low: float, threshold_
 def merge_outputs(outputs: List[Dict], consensus_level: ConsensusLevel) -> LLMOutput:
     """多路输出合并：高共识取首路，否则按各维度 confidence 总和择优"""
     if not outputs:
-        return default_llm_output()
+        return LLMOutput.default()
     
     if consensus_level == ConsensusLevel.HIGH:
-        return dict_to_llm_output(outputs[0])
+        return LLMOutput.from_dict(outputs[0])
     
     # 非高共识时按各维度 confidence 总和择优，避免仅凭情感单维自信度选路
     def total_confidence(output: Dict) -> float:
@@ -104,7 +112,7 @@ def merge_outputs(outputs: List[Dict], consensus_level: ConsensusLevel) -> LLMOu
         )
     
     best_output = max(outputs, key=total_confidence)
-    return dict_to_llm_output(best_output)
+    return LLMOutput.from_dict(best_output)
 
 
 def calculate_weight_multiplier(consensus_level: ConsensusLevel, low_consensus_weight: float) -> float:

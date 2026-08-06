@@ -10,7 +10,7 @@ from typing import Literal, Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
-from .llm_config import get_llm_settings, LLMSettings  # noqa: F401
+from .llm_config import get_llm_settings, LLMSettings, SETTINGS_MODEL_CONFIG  # noqa: F401
 
 
 class Settings(BaseSettings):
@@ -39,7 +39,6 @@ class Settings(BaseSettings):
 
     ENABLE_LLM_TOKENIZER: bool = Field(default=False, description="是否启用LLM辅助分词，复用SIMPLE_LLM")
     LLM_TOKENIZER_MIN_LENGTH: int = Field(default=20, description="触发LLM分词的最小文本长度")
-    LLM_TOKENIZER_CONCURRENCY: int = Field(default=8, description="LLM分词批量并发上限")
 
     CONTEXT_TIME_WINDOW: float = Field(default=5.0, description="微语境时间窗口（秒）")
     MAX_CONTEXT_TOKENS: int = Field(default=200, description="微语境最大 token 数")
@@ -90,12 +89,7 @@ class Settings(BaseSettings):
     PROJECT_ROOT: str = Field(default="", description="包安装目录（只读资源：词典等）")
     LEXICON_DIR: str = Field(default="", description="词典目录")
     
-    model_config = {
-        "env_file": os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
-        "env_file_encoding": "utf-8",
-        "case_sensitive": True,
-        "extra": "ignore",
-    }
+    model_config = SETTINGS_MODEL_CONFIG
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

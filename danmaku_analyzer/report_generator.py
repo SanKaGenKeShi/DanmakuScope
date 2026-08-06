@@ -2,19 +2,24 @@
 LLM 分析报告生成器 - 基于聚合数据生成社会语言学语料分析报告
 """
 
+import asyncio
 import json
 import os
 from typing import List, Dict, Any, Optional
 
 import pandas as pd
-from openai import AsyncOpenAI  # noqa: F401 保留供测试 patch，客户端构造统一走 llm_factory
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from .config import get_settings
 from .llm_config import get_llm_settings
 from .llm_factory import analysis_report_async_client
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# 提示词容量上限：超出则截断并告警（单视频报告按分区×冷热区分组，组数天然少）
+SINGLE_REPORT_MAX_GROUPS = 3
+CORPUS_REPORT_MAX_GROUPS = 12
 
 
 class AnalysisReportGenerator:
@@ -28,6 +33,8 @@ class AnalysisReportGenerator:
         self.model = llm_cfg.effective_analysis_report_model
         self.temperature = llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE
         self.enable_thinking = llm_cfg.ENABLE_THINKING
+        # 报告生成同样受全局 LLM 并发上限约束（规范：所有 LLM 调用经 Semaphore 限速）
+        self.llm_semaphore = asyncio.Semaphore(get_settings().LLM_CONCURRENCY)
 
         logger.info(f"分析报告生成器初始化完成，模型: {self.model}")
 
@@ -36,14 +43,16 @@ class AnalysisReportGenerator:
         aggregated_data: List[Dict[str, Any]],
         metadata: Dict[str, Any]
     ) -> Optional[str]:
-        logger.info("开始生成社会语言学语料分析报告")
+        logger.info(
+            f"开始生成社会语言学语料分析报告，模型: {self.model}，聚合组数: {len(aggregated_data)}"
+        )
 
         system_prompt = self._build_system_prompt(metadata)
         user_prompt = self._build_user_prompt(aggregated_data, metadata)
 
         try:
             report_content = await self._call_llm(system_prompt, user_prompt)
-            logger.info("社会语言学语料分析报告生成完成")
+            logger.info(f"社会语言学语料分析报告生成完成，长度 {len(report_content)} 字符")
             return report_content
         except Exception as e:
             logger.error(f"分析报告生成失败: {e}")
@@ -56,7 +65,7 @@ class AnalysisReportGenerator:
         corpus_metadata: Dict[str, Any],
     ) -> Optional[str]:
         """语料库级比较分析报告：输入为组级聚合表 + 视频级观测表 + 快照元数据"""
-        logger.info("开始生成语料库级社会语言学比较分析报告")
+        logger.info(f"开始生成语料库级社会语言学比较分析报告，模型: {self.model}")
 
         try:
             user_prompt = self._build_corpus_user_prompt(summary_csv_path, videos_csv_path, corpus_metadata)
@@ -66,7 +75,7 @@ class AnalysisReportGenerator:
 
         try:
             report_content = await self._call_llm(self._build_corpus_system_prompt(), user_prompt)
-            logger.info("语料库级比较分析报告生成完成")
+            logger.info(f"语料库级比较分析报告生成完成，长度 {len(report_content)} 字符")
             return report_content
         except Exception as e:
             logger.error(f"语料库报告生成失败: {e}")
@@ -96,7 +105,7 @@ class AnalysisReportGenerator:
         summary_df = pd.read_csv(summary_csv_path, encoding='utf-8-sig')
         videos_df = pd.read_csv(videos_csv_path, encoding='utf-8-sig')
 
-        max_groups = 12
+        max_groups = CORPUS_REPORT_MAX_GROUPS
         if len(summary_df) > max_groups:
             logger.warning(
                 f"语料库组数 {len(summary_df)} 超过提示词容量上限，仅取前 {max_groups} 组送入 LLM 报告生成，"
@@ -133,15 +142,16 @@ class AnalysisReportGenerator:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
         """单次 API 调用（含重试）；空内容与瞬时故障抛错触发 tenacity 重试"""
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=self.temperature,
-            extra_body={"enable_thinking": self.enable_thinking},
-        )
+        async with self.llm_semaphore:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=self.temperature,
+                extra_body={"enable_thinking": self.enable_thinking},
+            )
         report_content = response.choices[0].message.content
         if not report_content:
             raise ValueError("模型返回内容为空")
@@ -165,11 +175,7 @@ class AnalysisReportGenerator:
 请严格按照上述规范的术语定义、报告结构、写作规范和质量检查清单生成报告。"""
 
     def _load_report_spec(self) -> str:
-        spec_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "lexicon",
-            "report_spec.md"
-        )
+        spec_path = os.path.join(get_settings().LEXICON_DIR, "report_spec.md")
 
         try:
             with open(spec_path, 'r', encoding='utf-8') as f:
@@ -222,19 +228,20 @@ class AnalysisReportGenerator:
             "聚合数据摘要": [],
         }
 
-        if len(aggregated_data) > 3:
+        if len(aggregated_data) > SINGLE_REPORT_MAX_GROUPS:
             logger.warning(
-                f"聚合组数 {len(aggregated_data)} 超过提示词容量上限，仅取前 3 组送入 LLM 报告生成，"
-                f"其余 {len(aggregated_data) - 3} 组未纳入报告分析"
+                f"聚合组数 {len(aggregated_data)} 超过提示词容量上限，仅取前 {SINGLE_REPORT_MAX_GROUPS} 组送入 LLM 报告生成，"
+                f"其余 {len(aggregated_data) - SINGLE_REPORT_MAX_GROUPS} 组未纳入报告分析"
             )
 
-        for i, data in enumerate(aggregated_data[:3]):  # 最多3组数据
+        for i, data in enumerate(aggregated_data[:SINGLE_REPORT_MAX_GROUPS]):
             summary = {
                 "分组": f"{data.get('tname', '')}_{data.get('zone_type', '')}",
                 "弹幕数量": data.get("danmaku_count", 0),
                 "情感分布": data.get("emotion_distribution", {}),
                 "句类分布": data.get("sentence_function_distribution", {}),
                 "互动类型分布": data.get("interaction_type_distribution", {}),
+                "合作原则违反率": data.get("cooperative_principle_violation_rate", 0),
                 "正字法状态分布": data.get("orthography_status_distribution", {}),
                 "共识水平": {
                     "高共识率": data.get("high_consensus_rate", 0),

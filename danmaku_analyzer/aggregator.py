@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 
 from .hard_metrics import HardMetricsResult
-from .llm_client import DualPathResult
+from .llm_client import ConsensusLevel, DualPathResult
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -36,6 +36,7 @@ class AggregatedData:
     sentence_function_distribution: Dict[str, float] = field(default_factory=dict)
     interaction_type_distribution: Dict[str, float] = field(default_factory=dict)
     orthography_status_distribution: Dict[str, float] = field(default_factory=dict)
+    cooperative_principle_violation_rate: float = 0.0
     
     high_consensus_rate: float = 0.0
     medium_consensus_rate: float = 0.0
@@ -66,6 +67,7 @@ class AggregatedData:
                 "sentence_function_distribution": self.sentence_function_distribution,
                 "interaction_type_distribution": self.interaction_type_distribution,
                 "orthography_status_distribution": self.orthography_status_distribution,
+                "cooperative_principle_violation_rate": round(self.cooperative_principle_violation_rate, 4),
             },
             "consensus_stats": {
                 "high_consensus_rate": round(self.high_consensus_rate, 4),
@@ -89,6 +91,7 @@ class AggregatedData:
             "sentence_function_distribution": self.sentence_function_distribution,
             "interaction_type_distribution": self.interaction_type_distribution,
             "orthography_status_distribution": self.orthography_status_distribution,
+            "cooperative_principle_violation_rate": self.cooperative_principle_violation_rate,
             "high_consensus_rate": self.high_consensus_rate,
             "medium_consensus_rate": self.medium_consensus_rate,
             "low_consensus_rate": self.low_consensus_rate,
@@ -238,6 +241,7 @@ class Aggregator:
         sentence_function_counter = defaultdict(float)
         interaction_type_counter = defaultdict(float)
         orthography_status_counter = defaultdict(float)
+        cp_violation_weight = 0.0
         
         total_weight = sum(r.llm_result.weight_multiplier for r in records)
         
@@ -249,6 +253,8 @@ class Aggregator:
             sentence_function_counter[llm_output.sentence_function.label] += weight
             interaction_type_counter[llm_output.interaction_type.label] += weight
             orthography_status_counter[llm_output.orthography.status] += weight
+            if llm_output.cooperative_principle.violated:
+                cp_violation_weight += weight
         
         if total_weight > 0:
             aggregated.emotion_distribution = {
@@ -267,6 +273,7 @@ class Aggregator:
                 label: count / total_weight 
                 for label, count in orthography_status_counter.items()
             }
+            aggregated.cooperative_principle_violation_rate = cp_violation_weight / total_weight
     
     def _aggregate_consensus_stats(
         self, 
@@ -276,8 +283,6 @@ class Aggregator:
         """聚合共识统计（每条记录等权计数）"""
         if not records:
             return
-        
-        from .llm_client import ConsensusLevel
         
         high_count = 0
         medium_count = 0

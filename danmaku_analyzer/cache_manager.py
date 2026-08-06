@@ -6,7 +6,6 @@ import os
 import hashlib
 import pickle
 from typing import Any, Optional
-from pathlib import Path
 from datetime import datetime, timedelta
 
 from .config import get_settings
@@ -113,13 +112,7 @@ _cache_manager: Optional[CacheManager] = None
 
 
 def get_cache_manager() -> CacheManager:
-    """获取缓存管理器实例"""
     global _cache_manager
     if _cache_manager is None:
         _cache_manager = CacheManager()
     return _cache_manager
-
-
-def clear_all_caches():
-    cache_manager = get_cache_manager()
-    return cache_manager.clear()

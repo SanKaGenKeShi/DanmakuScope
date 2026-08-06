@@ -41,26 +41,6 @@ class _Response:
         self.choices = [_Choice(content)]
 
 
-class _FakeSyncCompletions:
-    def __init__(self, payload):
-        self.payload = payload
-        self.captured_kwargs = None
-
-    def create(self, **kwargs):
-        self.captured_kwargs = kwargs
-        return _Response(self.payload)
-
-
-class _FakeSyncChat:
-    def __init__(self, payload):
-        self.completions = _FakeSyncCompletions(payload)
-
-
-class _FakeSyncClient:
-    def __init__(self, payload):
-        self.chat = _FakeSyncChat(payload)
-
-
 class _FakeAsyncCompletions:
     def __init__(self, payloads):
         self.payloads = list(payloads)
@@ -107,10 +87,11 @@ class TestPosNormalization:
 
     def test_llm_tokenize_normalizes_and_sends_extra_body(self):
         analyzer = HardMetricsAnalyzer()
-        analyzer.llm_client = _FakeSyncClient(json.dumps([["你好", "noun"], ["跑", "verb"]]))
+        analyzer.llm_client = _FakeAsyncClient([json.dumps([["你好", "noun"], ["跑", "verb"]])])
         analyzer.llm_model = "fake-model"
         analyzer.enable_thinking = False
-        result = analyzer._llm_tokenize("你好跑")
+        analyzer.llm_semaphore = asyncio.Semaphore(4)
+        result = asyncio.run(analyzer._llm_tokenize("你好跑"))
         assert result == [("你好", "n"), ("跑", "v")]
         kwargs = analyzer.llm_client.chat.completions.captured_kwargs
         assert kwargs["extra_body"] == {"enable_thinking": False}
@@ -146,9 +127,13 @@ class TestReportGeneratorRetry:
 
     @pytest.fixture(autouse=True)
     def _fast_retry(self):
-        # 指数退避等待时间压到 0，避免拖慢测试（tenacity 装饰函数带 .retry 属性）
+        # 指数退避等待时间压到 0，避免拖慢测试；用例结束后还原，避免污染同 session 其他测试
         from tenacity import wait_none
-        AnalysisReportGenerator._call_llm.retry.wait = wait_none()
+        retry_state = AnalysisReportGenerator._call_llm.retry
+        original_wait = retry_state.wait
+        retry_state.wait = wait_none()
+        yield
+        retry_state.wait = original_wait
 
     def test_generate_signature_has_no_prompt_version(self):
         assert "prompt_version" not in inspect.signature(AnalysisReportGenerator.generate).parameters

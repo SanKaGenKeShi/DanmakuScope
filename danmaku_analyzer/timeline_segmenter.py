@@ -36,9 +36,9 @@ class TimeSegment:
 class TimelineSegmenter:
     
     def __init__(self):
-        self.settings = get_settings()
-        self.min_segment_samples = self.settings.MIN_SEGMENT_SAMPLES
-        self.segmentation_mode = self.settings.SEGMENTATION_MODE
+        settings = get_settings()
+        self.min_segment_samples = settings.MIN_SEGMENT_SAMPLES
+        self.segmentation_mode = settings.SEGMENTATION_MODE
     
     def segment(self, danmaku_list: List[DanmakuItem]) -> List[TimeSegment]:
         if not danmaku_list:
@@ -134,7 +134,6 @@ class TimelineSegmenter:
         
         min_time = timestamps.min()
         segments = []
-        prev_idx = 0
         
         breakpoint_indices = []
         for bp in breakpoints:
