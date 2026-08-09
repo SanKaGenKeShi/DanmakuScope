@@ -458,9 +458,15 @@ class DanmakuTUI(App):
         self.push_screen(SettingsScreen())
 
     def action_paste_input(self) -> None:
-        """从系统剪贴板粘贴文本到输入框（Textual 无法读取 OS 剪贴板，用 Win API 兑底）"""
+        """从系统剪贴板粘贴文本到当前模式的输入控件（Textual 无法读取 OS 剪贴板，用 Win API 兜底）"""
         text = self._read_system_clipboard()
-        if text:
+        if not text:
+            return
+        if self.query_one("#compare-controls").display:
+            area = self.query_one("#compare-area", CompareArea)
+            area.insert(text.strip())
+            area.focus()
+        else:
             input_widget = self.query_one("#bvid-input", Input)
             input_widget.insert_text_at_cursor(text.strip())
             input_widget.focus()
