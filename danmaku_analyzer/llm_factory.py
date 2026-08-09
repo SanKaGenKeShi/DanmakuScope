@@ -10,7 +10,7 @@ from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_PLACEHOLDER_KEYS = ("sk-xxx", "sk-yyy", "")
+_PLACEHOLDER_KEYS = ("sk-xxx", "sk-yyy", "sk-zzz", "")
 
 
 def _check_api_key(name: str, api_key: str) -> None:
@@ -38,11 +38,11 @@ def simple_async_client(timeout: float = 60.0) -> AsyncOpenAI:
 
 
 def analysis_report_async_client(timeout: float = 120.0) -> AsyncOpenAI:
-    """分析报告客户端（ANALYSIS_REPORT_LLM 配置，留空则复用 COMPLEX_LLM）"""
+    """分析报告客户端（ANALYSIS_REPORT_LLM 独立配置；空值以占位符构造，实际调用将失败并已告警）"""
     cfg = get_llm_settings()
-    _check_api_key("ANALYSIS_REPORT_LLM_API_KEY", cfg.effective_analysis_report_api_key)
+    _check_api_key("ANALYSIS_REPORT_LLM_API_KEY", cfg.ANALYSIS_REPORT_LLM_API_KEY)
     return create_async_client(
-        cfg.effective_analysis_report_base_url,
-        cfg.effective_analysis_report_api_key,
+        cfg.ANALYSIS_REPORT_LLM_BASE_URL or "https://api.openai.com/v1",
+        cfg.ANALYSIS_REPORT_LLM_API_KEY or "sk-zzz",
         timeout,
     )

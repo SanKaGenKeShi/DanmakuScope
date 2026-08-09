@@ -17,8 +17,9 @@ if TYPE_CHECKING:
     from .context_provider import ContextProvider, ContextWindow
     from .statistical_validator import StatisticalValidator, ConfidenceInterval, DescriptiveStats
     from .prompt_builder import PromptBuilder, PromptComponents
-    from .llm_client import (
-        LLMClient, DualPathResult, ConsensusLevel, LLMOutput,
+    from .llm_client import LLMClient
+    from .llm_models import (
+        DualPathResult, ConsensusLevel, LLMOutput,
         EmotionOutput, CooperativePrincipleOutput, InteractionTypeOutput,
         SentenceFunctionOutput, OrthographyOutput,
     )
@@ -75,11 +76,11 @@ _LAZY_EXPORTS = {
     "StatisticalValidator": ".statistical_validator",
     "ConfidenceInterval": ".statistical_validator", "DescriptiveStats": ".statistical_validator",
     "PromptBuilder": ".prompt_builder", "PromptComponents": ".prompt_builder",
-    "LLMClient": ".llm_client", "DualPathResult": ".llm_client",
-    "ConsensusLevel": ".llm_client", "LLMOutput": ".llm_client",
-    "EmotionOutput": ".llm_client", "CooperativePrincipleOutput": ".llm_client",
-    "InteractionTypeOutput": ".llm_client", "SentenceFunctionOutput": ".llm_client",
-    "OrthographyOutput": ".llm_client",
+    "LLMClient": ".llm_client", "DualPathResult": ".llm_models",
+    "ConsensusLevel": ".llm_models", "LLMOutput": ".llm_models",
+    "EmotionOutput": ".llm_models", "CooperativePrincipleOutput": ".llm_models",
+    "InteractionTypeOutput": ".llm_models", "SentenceFunctionOutput": ".llm_models",
+    "OrthographyOutput": ".llm_models",
     "Aggregator": ".aggregator", "AggregatedData": ".aggregator", "DanmakuRecord": ".aggregator",
     "Reporter": ".reporter",
     "AnalysisReportGenerator": ".report_generator",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "danmaku-analyzer"
-version = "0.2.2-beta"
+version = "0.3.0-beta"
 description = "DanmakuScope - B站弹幕社会语言学分析工具"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,6 +32,7 @@ dependencies = [
     "qrcode>=7.4",
     "loguru>=0.7.0",
     "pandas>=2.0.0",
+    "textual>=0.50.0",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +46,7 @@ dev = [
 
 [project.scripts]
 danmaku-analyzer = "danmaku_analyzer.cli:main"
+danmaku-tui = "danmaku_analyzer.tui.app:run_tui"
 
 [tool.setuptools.packages.find]
 include = ["danmaku_analyzer*"]

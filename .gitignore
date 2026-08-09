@@ -77,6 +77,7 @@ AGENTS.md
 .docs/
 danmaku_analyzer/data/cache/*
 danmaku_analyzer/data/corpus_index.json
+danmaku_analyzer/data/tui_prefs.json
 danmaku_analyzer/data/logs/*.log
 danmaku_analyzer/data/raw/*
 danmaku_analyzer/data/reports/*
@@ -108,3 +109,5 @@ data/logs/*.log
 *.cookie
 
 !danmaku_analyzer/utils/token_counter.py
+
+.tmp_*

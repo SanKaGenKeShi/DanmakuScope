@@ -215,7 +215,3 @@ class TestSuggestFlow:
         assert fake_search == []
         assert result.gaps == []
         assert result.candidates == {}
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

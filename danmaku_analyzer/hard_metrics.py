@@ -65,7 +65,7 @@ class HardMetricsAnalyzer:
             llm_cfg = get_llm_settings()
             self.llm_client = simple_async_client(timeout=30.0)
             self.llm_model = llm_cfg.SIMPLE_LLM_MODEL
-            self.enable_thinking = llm_cfg.ENABLE_THINKING
+            self.enable_thinking = llm_cfg.SIMPLE_LLM_ENABLE_THINKING
             # 与主链路共用同一并发上限，所有 LLM 调用统一经此信号量限速
             self.llm_semaphore = asyncio.Semaphore(self.settings.LLM_CONCURRENCY)
             logger.info(f"LLM 分词已启用，模型: {self.llm_model}，最小触发长度: {self.llm_tokenizer_min_length}")

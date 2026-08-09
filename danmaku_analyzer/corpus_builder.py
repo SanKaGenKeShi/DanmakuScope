@@ -90,20 +90,10 @@ class CorpusBuilder:
         summaries: List[VideoSummary] = []
         readable_zips: List[str] = []
         for path in zip_paths:
-            try:
-                metadata, tables = self.read_zip(path)
-            except (OSError, zipfile.BadZipFile, KeyError, ValueError) as e:
-                logger.warning(f"跳过无法回读的 ZIP: {path} - {e}")
-                continue
-            readable_zips.append(path)
-            try:
-                store.register_video(self._index_entry(metadata, path))
-            except ValueError as e:
-                logger.warning(f"索引登记失败（不阻断聚合）: {path} - {e}")
-            try:
-                summaries.extend(self.summarize_video(metadata, tables))
-            except ValueError as e:
-                logger.warning(f"跳过无法摘要的 ZIP: {path} - {e}")
+            result = self._process_zip(path, store)
+            if result is not None:
+                readable_zips.append(path)
+                summaries.extend(result)
 
         return self._aggregate_and_write(summaries, output_dir, readable_zips)
 
@@ -117,18 +107,30 @@ class CorpusBuilder:
             if not os.path.exists(zip_path):
                 logger.warning(f"索引中 ZIP 不存在，跳过: {video.get('bvid')} - {zip_path}")
                 continue
-            try:
-                metadata, tables = self.read_zip(zip_path)
-            except (OSError, zipfile.BadZipFile, KeyError, ValueError) as e:
-                logger.warning(f"跳过无法回读的 ZIP: {zip_path} - {e}")
-                continue
-            readable_zips.append(zip_path)
-            try:
-                summaries.extend(self.summarize_video(metadata, tables))
-            except ValueError as e:
-                logger.warning(f"跳过无法摘要的 ZIP: {zip_path} - {e}")
+            result = self._process_zip(zip_path)
+            if result is not None:
+                readable_zips.append(zip_path)
+                summaries.extend(result)
 
         return self._aggregate_and_write(summaries, output_dir, readable_zips)
+
+    def _process_zip(self, path: str, register_to: Optional[CorpusStore] = None) -> Optional[List[VideoSummary]]:
+        """回读单个 ZIP 并生成摘要；不可回读返回 None（不计入来源清单）"""
+        try:
+            metadata, tables = self.read_zip(path)
+        except (OSError, zipfile.BadZipFile, KeyError, ValueError) as e:
+            logger.warning(f"跳过无法回读的 ZIP: {path} - {e}")
+            return None
+        if register_to is not None:
+            try:
+                register_to.register_video(self._index_entry(metadata, path))
+            except ValueError as e:
+                logger.warning(f"索引登记失败（不阻断聚合）: {path} - {e}")
+        try:
+            return self.summarize_video(metadata, tables)
+        except ValueError as e:
+            logger.warning(f"跳过无法摘要的 ZIP: {path} - {e}")
+            return []
 
     def read_zip(self, zip_path: str) -> Tuple[Dict, Dict[str, pd.DataFrame]]:
         """回读 ZIP：metadata.json + 各聚合表 CSV；缺失必需文件时抛 KeyError"""

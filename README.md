@@ -1,8 +1,8 @@
 # DanmakuScope
 
-B 站弹幕社会语言学分析命令行工具。采集弹幕及视频元数据，经硬统计与 LLM 软标签双通道分析后，按官方分区（tname）聚合输出交叉统计表，为社会语言学/语料库语言学实证研究提供可溯源、可复核的语料数据。
+B 站弹幕社会语言学分析工具（命令行 + 终端图形界面）。采集弹幕及视频元数据，经硬统计与 LLM 软标签双通道分析后，按官方分区（tname）聚合输出交叉统计表，为社会语言学/语料库语言学实证研究提供可溯源、可复核的语料数据。
 
-当前版本：**v0.2.2-beta**
+当前版本：**v0.3.0-beta**
 
 ---
 
@@ -18,6 +18,7 @@ B 站弹幕社会语言学分析命令行工具。采集弹幕及视频元数据
 | 分析报告 | 可选调用 LLM 生成社会语言学语料分析报告                                                           |
 | 产出打包 | 全部产出自动打包为 `[BV号]视频标题.zip`                                                           |
 | 语料库比较 | 跨视频语料库级聚合 + Kruskal-Wallis/Dunn 检验 + 分区缺口补足建议 + R/ggplot2 可视化脚本 |
+| TUI 界面 | Textual 终端图形界面：个体分析/比对分析双模式、设置中心（含参数说明与 LLM 连接检测）、设置持久化 |
 
 ---
 
@@ -65,9 +66,10 @@ cp .env.example .env
 
 | 变量 | 说明 |
 |------|------|
-| `ENABLE_LLM_ANALYSIS_REPORT` | 启用 LLM 社会语言学分析报告生成 |
+| `ENABLE_LLM_ANALYSIS_REPORT` | 启用 LLM 社会语言学分析报告生成（默认开启，需配置分析报告 LLM） |
+| `ANALYSIS_REPORT_LLM_BASE_URL` / `_API_KEY` / `_MODEL` | 分析报告 LLM，独立配置（不再自动复用复杂任务 LLM） |
 | `DATA_ROOT` | 数据输出根目录，默认 `~/.danmaku-scope` |
-| `ENABLE_THINKING` | 启用 LLM 思考模式（默认关闭） |
+| `SIMPLE_LLM_ENABLE_THINKING` / `COMPLEX_LLM_ENABLE_THINKING` / `ANALYSIS_REPORT_LLM_ENABLE_THINKING` | 三个 LLM 各自独立的思考模式开关（默认全部关闭） |
 
 **B 站登录凭证**（推荐扫码登录，无需手动配置）：
 
@@ -112,6 +114,12 @@ danmaku-analyzer corpus "[BV1xx]标题.zip" "[BV1yy]标题.zip" --with-r
 # 语料库补足建议（分区缺口 + 在线候选视频；--gaps-only 仅离线缺口）
 danmaku-analyzer suggest 游戏 音乐 --per-partition 5
 danmaku-analyzer suggest --gaps-only
+```
+
+**TUI 界面**（个体分析 / 比对分析双模式，设置中心支持参数编辑与持久化）：
+
+```bash
+danmaku-tui
 ```
 
 ---
@@ -166,6 +174,7 @@ danmaku_analyzer/
 ├── corpus_builder.py       # 语料库级聚合（ZIP 回读 + 跨视频比较表）
 ├── corpus_suggester.py     # 语料库补足建议（缺口分析 + 候选推荐）
 ├── corpus_visualizer.py    # R/ggplot2 可视化脚本模板
+├── tui/                    # TUI 子包（Textual：主应用/文案与偏好/设置中心）
 ├── utils/                  # 工具子包（日志/解析器/Token 计数）
 └── lexicon/                # 自定义词典 + 报告规范
 ```
@@ -175,6 +184,7 @@ danmaku_analyzer/
 ## 技术栈
 
 - **CLI**：click, rich
+- **TUI**：textual
 - **配置**：pydantic-settings, python-dotenv
 - **硬统计**：jieba（自定义词典）, regex, emoji
 - **语义分析**：openai SDK, tenacity, tiktoken

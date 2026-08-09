@@ -5,7 +5,7 @@ LLM 客户端算法单元测试 - JSD 计算 / 共识判定 / 输出合并 / 容
 
 import pytest
 
-from danmaku_analyzer.llm_client import (
+from danmaku_analyzer.llm_models import (
     LLMOutput, DualPathResult, ConsensusLevel,
     EmotionOutput, CooperativePrincipleOutput,
     InteractionTypeOutput, SentenceFunctionOutput, OrthographyOutput,
@@ -293,7 +293,3 @@ class TestDualPathResultSerialization:
         assert d["weight_multiplier"] == 1.0
         assert d["prompt_version"] == "v2.2.0"
         assert "output" in d
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

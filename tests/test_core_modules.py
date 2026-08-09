@@ -6,7 +6,6 @@
 import pytest
 import json
 import numpy as np
-from unittest.mock import patch, MagicMock
 from dataclasses import dataclass
 
 from danmaku_analyzer.hard_metrics import HardMetricsAnalyzer, HardMetricsResult
@@ -14,7 +13,7 @@ from danmaku_analyzer.aggregator import Aggregator, AggregatedData, DanmakuRecor
 from danmaku_analyzer.reporter import Reporter
 from danmaku_analyzer.timeline_segmenter import TimelineSegmenter, TimeSegment
 from danmaku_analyzer.crawler import DanmakuItem
-from danmaku_analyzer.llm_client import (
+from danmaku_analyzer.llm_models import (
     DualPathResult, LLMOutput, ConsensusLevel,
     EmotionOutput, CooperativePrincipleOutput,
     InteractionTypeOutput, SentenceFunctionOutput, OrthographyOutput,
@@ -339,9 +338,8 @@ class TestTimelineSegmenterFixed:
     """时序切分器 - 固定模式测试"""
 
     def setup_method(self):
-        """以 fixed 模式初始化"""
-        with patch.object(TimelineSegmenter, '__init__', lambda self: None):
-            self.segmenter = TimelineSegmenter()
+        """以 fixed 模式初始化（真实构造后覆写字段，避免跳过构造函数）"""
+        self.segmenter = TimelineSegmenter()
         self.segmenter.min_segment_samples = 5
         self.segmenter.segmentation_mode = "fixed"
 
@@ -394,9 +392,8 @@ class TestTimelineSegmenterDynamic:
     """时序切分器 - 动态模式测试"""
 
     def setup_method(self):
-        """以 dynamic 模式初始化"""
-        with patch.object(TimelineSegmenter, '__init__', lambda self: None):
-            self.segmenter = TimelineSegmenter()
+        """以 dynamic 模式初始化（真实构造后覆写字段，避免跳过构造函数）"""
+        self.segmenter = TimelineSegmenter()
         self.segmenter.min_segment_samples = 5
         self.segmenter.segmentation_mode = "dynamic"
 
@@ -509,7 +506,7 @@ class TestReporterMetadata:
             "pubdate": "2025-08-05T12:00:00",
             "view_count": 12345,
             "danmaku_count": 40,
-            "pipeline_version": "0.2.2-beta",
+            "pipeline_version": "0.3.0-beta",
         }
         filepath = reporter._generate_metadata(aggregated, extra)
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -528,7 +525,3 @@ class TestReporterMetadata:
         assert "generated_at" in data
         assert data["total_videos"] == 1
         assert data["partitions"] == ["游戏"]
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

@@ -35,7 +35,7 @@ async def full_pipeline_test():
     print(f"  简单任务: {settings.llm.SIMPLE_LLM_MODEL} @ {settings.llm.SIMPLE_LLM_BASE_URL}")
     print(f"分析策略: 频次最高的前 {settings.TOP_N} 条弹幕")
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
-        print(f"LLM分析报告: 已启用 (模型: {settings.llm.effective_analysis_report_model})")
+        print(f"LLM分析报告: 已启用 (模型: {settings.llm.ANALYSIS_REPORT_LLM_MODEL})")
     else:
         print(f"LLM分析报告: 未启用")
     print("="*60)

@@ -63,7 +63,7 @@ def make_fake_zip(
         "partitions": [tname],
         "bvid": bvid, "title": f"测试-{bvid}", "tname": tname, "tags": [],
         "pubdate": pubdate, "view_count": 1000, "danmaku_count": danmaku_count,
-        "pipeline_version": "0.2.2-beta",
+        "pipeline_version": "0.3.0-beta",
     }
     zip_path = os.path.join(str(dir_path), f"[{bvid}]test.zip")
     with zipfile.ZipFile(zip_path, 'w') as zipf:
@@ -347,7 +347,3 @@ class TestCorpusReportPrompt:
         assert "语料库概况" in prompt
         assert "组级聚合数据" in prompt
         assert "BV1r1" in prompt and "BV1r2" in prompt
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

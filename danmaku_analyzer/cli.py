@@ -302,14 +302,26 @@ async def _login_async(output: Optional[str]):
 
 
 def _render_qrcode(url: str):
-    """终端渲染二维码（qrcode 库缺失时静默降级，仅提示链接）"""
+    """终端渲染二维码：每模块双字符保证宽高比，反色输出保证任意终端主题下的对比度；qrcode 库缺失时静默降级"""
     try:
         import qrcode
-        qr = qrcode.QRCode(border=1)
-        qr.add_data(url)
-        qr.print_ascii(invert=True)
     except ImportError:
         logger.warning("qrcode 库未安装，跳过终端二维码渲染")
+        return
+    qr = qrcode.QRCode(border=2)
+    qr.add_data(url)
+    rows = [
+        "\x1b[7m" + "".join("██" if cell else "  " for cell in row) + "\x1b[0m"
+        for row in qr.get_matrix()
+    ]
+    try:
+        print("\n".join(rows))
+    except UnicodeEncodeError:
+        try:
+            ascii_rows = ["".join("##" if cell else "  " for cell in row) for row in qr.get_matrix()]
+            print("\n".join(ascii_rows))
+        except UnicodeEncodeError:
+            logger.warning("终端编码不支持二维码字符，请使用下方链接登录")
 
 
 @cli.command()
@@ -363,7 +375,7 @@ def config():
     table.add_row("最大Context Tokens", str(settings.MAX_CONTEXT_TOKENS))
     table.add_row("LLM分析报告", "开启" if settings.ENABLE_LLM_ANALYSIS_REPORT else "关闭")
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
-        table.add_row("分析报告模型", llm_cfg.effective_analysis_report_model)
+        table.add_row("分析报告模型", llm_cfg.ANALYSIS_REPORT_LLM_MODEL)
     
     console.print(table)
 

@@ -2,7 +2,6 @@
 输入解析器单元测试
 """
 
-import pytest
 import asyncio
 from danmaku_analyzer.utils.input_parser import InputParser, InputType, ParsedInput
 
@@ -121,7 +120,3 @@ class TestInputParserEdgeCases:
         result = self.parser.parse("av999999999")
         assert result.input_type == InputType.AV
         assert result.avid == 999999999
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

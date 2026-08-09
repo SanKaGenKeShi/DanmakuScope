@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 
 from .hard_metrics import HardMetricsResult
-from .llm_client import ConsensusLevel, DualPathResult
+from .llm_models import ConsensusLevel, DualPathResult
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)

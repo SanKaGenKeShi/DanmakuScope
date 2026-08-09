@@ -74,7 +74,3 @@ class TestWriteRScript:
         with open(path, "rb") as f:
             raw = f.read()
         assert b"\r\n" not in raw
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

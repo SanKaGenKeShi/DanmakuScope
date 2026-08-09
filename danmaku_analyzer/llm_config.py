@@ -37,6 +37,10 @@ class LLMSettings(BaseSettings):
         default=[0.1, 0.4], 
         description="复杂任务双路温度"
     )
+    COMPLEX_LLM_ENABLE_THINKING: bool = Field(
+        default=False,
+        description="复杂任务 LLM 是否启用思考模式（独立配置）"
+    )
     
     # 简单句类任务（sentence_function）
     SIMPLE_LLM_BASE_URL: str = Field(
@@ -55,23 +59,31 @@ class LLMSettings(BaseSettings):
         default=0.0, 
         description="简单任务温度（单路，确定性）"
     )
+    SIMPLE_LLM_ENABLE_THINKING: bool = Field(
+        default=False,
+        description="简单任务 LLM 是否启用思考模式（独立配置）"
+    )
     
-    # 分析报告生成任务，留空则自动复用 COMPLEX_LLM 配置
+    # 分析报告生成任务，独立配置（不再留空复用 COMPLEX_LLM；占位值表示未配置）
     ANALYSIS_REPORT_LLM_BASE_URL: str = Field(
-        default="", 
-        description="分析报告 LLM 基础 URL，留空复用COMPLEX_LLM"
+        default="https://api.openai.com/v1", 
+        description="分析报告 LLM 基础 URL（独立配置，需自行填写）"
     )
     ANALYSIS_REPORT_LLM_API_KEY: str = Field(
-        default="", 
-        description="分析报告 LLM API Key，留空复用COMPLEX_LLM"
+        default="sk-zzz", 
+        description="分析报告 LLM API Key（独立配置，需自行填写）"
     )
     ANALYSIS_REPORT_LLM_MODEL: str = Field(
-        default="", 
-        description="分析报告 LLM 模型，留空复用COMPLEX_LLM"
+        default="gpt-4o-mini", 
+        description="分析报告 LLM 模型（独立配置，需自行填写）"
     )
     ANALYSIS_REPORT_LLM_TEMPERATURE: float = Field(
         default=0.3, 
         description="分析报告 LLM 温度"
+    )
+    ANALYSIS_REPORT_LLM_ENABLE_THINKING: bool = Field(
+        default=False,
+        description="分析报告 LLM 是否启用思考模式（独立配置）"
     )
     
     ENABLE_DUAL_PATH: bool = Field(
@@ -91,29 +103,12 @@ class LLMSettings(BaseSettings):
         description="低共识权重"
     )
     
-    ENABLE_THINKING: bool = Field(
-        default=False,
-        description="是否启用模型思考模式（Qwen等模型的reasoning/thinking）。关闭可避免content为空导致的JSON解析重试"
-    )
-    
     PROMPT_VERSION: str = Field(
         default="v2.2.1", 
         description="Prompt 版本"
     )
     
     model_config = SETTINGS_MODEL_CONFIG
-    
-    @property
-    def effective_analysis_report_base_url(self) -> str:
-        return self.ANALYSIS_REPORT_LLM_BASE_URL or self.COMPLEX_LLM_BASE_URL
-    
-    @property
-    def effective_analysis_report_api_key(self) -> str:
-        return self.ANALYSIS_REPORT_LLM_API_KEY or self.COMPLEX_LLM_API_KEY
-    
-    @property
-    def effective_analysis_report_model(self) -> str:
-        return self.ANALYSIS_REPORT_LLM_MODEL or self.COMPLEX_LLM_MODEL
 
 
 llm_settings: Optional[LLMSettings] = None

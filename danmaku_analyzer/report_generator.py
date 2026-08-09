@@ -26,13 +26,13 @@ class AnalysisReportGenerator:
     """社会语言学分析报告生成器"""
 
     def __init__(self):
-        """初始化报告生成器（使用 ANALYSIS_REPORT_LLM 配置，留空则复用 COMPLEX_LLM）"""
+        """初始化报告生成器（使用 ANALYSIS_REPORT_LLM 独立配置）"""
         llm_cfg = get_llm_settings()
 
         self.client = analysis_report_async_client(timeout=120.0)  # 报告生成可能需要更长时间
-        self.model = llm_cfg.effective_analysis_report_model
+        self.model = llm_cfg.ANALYSIS_REPORT_LLM_MODEL
         self.temperature = llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE
-        self.enable_thinking = llm_cfg.ENABLE_THINKING
+        self.enable_thinking = llm_cfg.ANALYSIS_REPORT_LLM_ENABLE_THINKING
         # 报告生成同样受全局 LLM 并发上限约束（规范：所有 LLM 调用经 Semaphore 限速）
         self.llm_semaphore = asyncio.Semaphore(get_settings().LLM_CONCURRENCY)
 

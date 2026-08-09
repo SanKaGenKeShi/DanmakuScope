@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     DYNAMIC_SEGMENT_METHOD: Literal["density"] = Field(default="density", description="动态切分方法：density")
     MIN_SEGMENT_SAMPLES: int = Field(default=30, description="每个动态分段最少弹幕数")
 
-    ENABLE_LLM_ANALYSIS_REPORT: bool = Field(default=False, description="是否启用LLM分析报告生成")
+    ENABLE_LLM_ANALYSIS_REPORT: bool = Field(default=True, description="是否启用LLM分析报告生成")
     LLM_CONCURRENCY: int = Field(default=5, description="LLM 并发调用上限")
 
     ENABLE_LLM_TOKENIZER: bool = Field(default=False, description="是否启用LLM辅助分词，复用SIMPLE_LLM")

@@ -12,28 +12,20 @@ import regex
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from .config import get_settings
 from .llm_config import get_llm_settings
 from .llm_factory import complex_async_client, simple_async_client
 from .prompt_builder import PromptComponents
 from .utils.logger import get_logger
-from .llm_models import (
-    EmotionOutput, CooperativePrincipleOutput, InteractionTypeOutput,
-    SentenceFunctionOutput, OrthographyOutput,
-    ConsensusLevel, LLMOutput, DualPathResult,
-)
+from .llm_models import ConsensusLevel, LLMOutput, DualPathResult, SentenceFunctionOutput
 from .llm_consensus import (
     calculate_jsd, determine_consensus_level, merge_outputs, calculate_weight_multiplier,
 )
 
 logger = get_logger(__name__)
 
-# 向后兼容：历史导入方（aggregator/pipeline/tests/__init__）均从本模块取符号
-__all__ = [
-    "LLMClient",
-    "EmotionOutput", "CooperativePrincipleOutput", "InteractionTypeOutput",
-    "SentenceFunctionOutput", "OrthographyOutput",
-    "ConsensusLevel", "LLMOutput", "DualPathResult",
-]
+# 数据模型符号由 llm_models.py 提供，消费方直接从该模块导入
+__all__ = ["LLMClient"]
 
 
 class LLMClient:
@@ -41,6 +33,7 @@ class LLMClient:
     def __init__(self):
         llm_cfg = get_llm_settings()
         
+        self.semaphore = asyncio.Semaphore(get_settings().LLM_CONCURRENCY)
         self.complex_client = complex_async_client()
         self.complex_model = llm_cfg.COMPLEX_LLM_MODEL
         self.complex_temperatures = llm_cfg.COMPLEX_LLM_TEMPERATURES
@@ -54,14 +47,15 @@ class LLMClient:
         self.low_consensus_weight = llm_cfg.LOW_CONSENSUS_WEIGHT
         
         self.enable_dual_path = llm_cfg.ENABLE_DUAL_PATH
-        self.enable_thinking = llm_cfg.ENABLE_THINKING
+        self.enable_thinking = llm_cfg.COMPLEX_LLM_ENABLE_THINKING
+        self.simple_enable_thinking = llm_cfg.SIMPLE_LLM_ENABLE_THINKING
         
         logger.info(
             f"LLM 客户端初始化完成，"
             f"复杂模型: {self.complex_model}，"
             f"简单模型: {self.simple_model}，"
             f"双路: {'开启' if self.enable_dual_path else '关闭'}，"
-            f"思考模式: {'开启' if self.enable_thinking else '关闭'}"
+            f"思考模式(复杂/简单): {'开启' if self.enable_thinking else '关闭'}/{'开启' if self.simple_enable_thinking else '关闭'}"
         )
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
@@ -71,8 +65,24 @@ class LLMClient:
         model: str,
         system_prompt: str,
         user_prompt: str,
-        temperature: float
+        temperature: float,
+        enable_thinking: bool = None,
     ) -> Dict[str, Any]:
+        async with self.semaphore:
+            return await self._call_llm_once(
+                client, model, system_prompt, user_prompt, temperature, enable_thinking
+            )
+
+    async def _call_llm_once(
+        self,
+        client: AsyncOpenAI,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        enable_thinking: bool = None,
+    ) -> Dict[str, Any]:
+        thinking = self.enable_thinking if enable_thinking is None else enable_thinking
         try:
             response = await client.chat.completions.create(
                 model=model,
@@ -82,7 +92,7 @@ class LLMClient:
                 ],
                 temperature=temperature,
                 response_format={"type": "json_object"},
-                extra_body={"enable_thinking": self.enable_thinking},
+                extra_body={"enable_thinking": thinking},
             )
             
             content = response.choices[0].message.content
@@ -125,7 +135,8 @@ class LLMClient:
                     self.complex_model,
                     system_prompt,
                     user_prompt,
-                    temp
+                    temp,
+                    self.enable_thinking,
                 )
             except Exception as e:
                 logger.error(f"复杂任务推理失败 (temp={temp}): {e}")
@@ -184,7 +195,8 @@ class LLMClient:
                 self.simple_model,
                 prompt_components.system_prompt,
                 prompt_components.user_prompt,
-                self.simple_temperature
+                self.simple_temperature,
+                self.simple_enable_thinking,
             )
             
             sf_data = output.get("sentence_function", {})

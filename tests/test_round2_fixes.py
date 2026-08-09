@@ -196,7 +196,3 @@ class TestCacheSchemaVersion:
             pickle.dump({"schema_version": cm.CACHE_SCHEMA_VERSION + 1,
                          "payload": ("x",)}, f)
         assert cache.get("stale") is None
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

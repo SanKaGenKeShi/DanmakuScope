@@ -28,7 +28,8 @@ from .aggregator import Aggregator, DanmakuRecord, AggregatedData
 from .reporter import Reporter
 from .statistical_validator import StatisticalValidator
 from .cache_manager import get_cache_manager
-from .corpus_builder import validate_zip_archive
+from .corpus_builder import METADATA_FILENAME, CorpusBuilder, validate_zip_archive
+from .corpus_store import CorpusStore
 from .utils.input_parser import InputParser, InputType
 from .utils.logger import get_logger
 
@@ -222,7 +223,7 @@ async def _stage_preprocess(crawl: CrawlOutput, progress: ProgressCallback) -> P
 
 
 async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOptions) -> SegmentAnalysisOutput:
-    """阶段 4：对每个分段执行硬统计 + LLM 分析（段间并行，全局信号量限速）"""
+    """阶段 4：对每个分段执行硬统计 + LLM 分析（段间并行，LLM 调用经客户端实例级信号量限速）"""
     settings = options.settings
     progress = options.progress
     social_vars = pre.social_vars
@@ -235,7 +236,6 @@ async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOption
     context_provider = ContextProvider()
     prompt_builder = PromptBuilder()
     llm_client = LLMClient()
-    llm_semaphore = asyncio.Semaphore(settings.LLM_CONCURRENCY)
 
     # 各段弹幕预计算，硬统计任务一次性全部提交（LLM 分词由内部信号量限速，纯 jieba 时委托 executor）
     segment_danmaku_lists = [
@@ -248,21 +248,20 @@ async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOption
     ])
 
     async def _analyze_one(danmaku, segment, segment_danmaku, hard_metrics, segment_idx):
-        async with llm_semaphore:
-            context = context_provider.get_context(danmaku, segment, segment_danmaku)
-            context_text = context.to_prompt_text()
-            complex_prompt = prompt_builder.build_complex_prompt(
-                social_vars.tname, social_vars.tags, danmaku.content, context_text
-            )
-            simple_prompt = prompt_builder.build_simple_prompt(danmaku.content)
-            llm_result = await llm_client.analyze(complex_prompt, simple_prompt)
-            return DanmakuRecord(
-                tname=social_vars.tname, zone_type=segment.zone_type,
-                tags=social_vars.tags, hard_metrics=hard_metrics,
-                llm_result=llm_result, segment_id=segment_idx,
-            )
+        context = context_provider.get_context(danmaku, segment, segment_danmaku)
+        context_text = context.to_prompt_text()
+        complex_prompt = prompt_builder.build_complex_prompt(
+            social_vars.tname, social_vars.tags, danmaku.content, context_text
+        )
+        simple_prompt = prompt_builder.build_simple_prompt(danmaku.content)
+        llm_result = await llm_client.analyze(complex_prompt, simple_prompt)
+        return DanmakuRecord(
+            tname=social_vars.tname, zone_type=segment.zone_type,
+            tags=social_vars.tags, hard_metrics=hard_metrics,
+            llm_result=llm_result, segment_id=segment_idx,
+        )
 
-    # 所有段的采样与 LLM 任务一次性提交，由信号量全局限速，避免段间串行空等
+    # 所有段的采样与 LLM 任务一次性提交，由 LLMClient 实例级信号量限速，避免段间串行空等
     tasks = []
     task_samples = []  # 与 tasks 一一对应：(样本弹幕, 所属段)
     for i, segment in enumerate(segments):
@@ -430,3 +429,117 @@ async def _stage_report(
     zip_valid = _package_reports_zip(reports, zip_path, progress)
 
     return ReportOutput(reports=reports, zip_path=zip_path, zip_valid=zip_valid)
+
+
+@dataclass
+class CompareItem:
+    """比对清单中单个视频的处置结果"""
+    raw_input: str
+    bvid: str = ""
+    title: str = ""
+    zip_path: str = ""
+    reused: bool = False
+    ok: bool = False
+    error: str = ""
+
+
+@dataclass
+class CompareResult:
+    """批量比对产物：逐项处置结果 + 语料库快照"""
+    items: List[CompareItem] = field(default_factory=list)
+    snapshot_path: Optional[str] = None
+    summary_csv_path: Optional[str] = None
+    snapshot_valid: bool = False
+
+
+def _find_reusable_zip(store: CorpusStore, bvid: str) -> str:
+    """索引中查找该 bvid 已登记的可用报告 ZIP（非空且含 metadata.json），不可用返回空串"""
+    for video in store.get_videos():
+        if video.get("bvid") != bvid:
+            continue
+        zip_path = store.resolve_zip_path(video.get("zip_path", ""))
+        if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+            continue
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zipf:
+                if METADATA_FILENAME not in zipf.namelist():
+                    continue
+        except (OSError, zipfile.BadZipFile):
+            continue
+        return zip_path
+    return ""
+
+
+async def compare_videos(
+    input_list: List[str],
+    reuse: bool = True,
+    output_dir: Optional[str] = None,
+    progress: ProgressCallback = _default_progress,
+) -> CompareResult:
+    """批量比对：逐条执行个体分析（reuse 时索引中已有可用报告则复用跳过），随后语料库级聚合并打包快照"""
+    result = CompareResult()
+    store = CorpusStore()
+
+    for idx, raw in enumerate(input_list, start=1):
+        item = CompareItem(raw_input=raw)
+        result.items.append(item)
+        try:
+            bvid = await _stage_resolve_input(raw, progress)
+            item.bvid = bvid
+            if reuse:
+                zip_path = _find_reusable_zip(store, bvid)
+                if zip_path:
+                    item.zip_path = zip_path
+                    item.reused = True
+                    item.ok = True
+                    progress("比对分析", f"[{idx}/{len(input_list)}] 复用已有报告: {bvid}")
+                    continue
+            analysis = await analyze_video(
+                raw,
+                output_dir=output_dir,
+                progress_callback=progress,
+                no_cache=not reuse,
+            )
+            if analysis.zip_valid and analysis.zip_path:
+                item.zip_path = analysis.zip_path
+                item.title = analysis.title
+                item.ok = True
+                progress("比对分析", f"[{idx}/{len(input_list)}] 分析完成: {bvid}")
+            else:
+                item.error = "分析未产生有效报告"
+                progress("比对分析", f"[{idx}/{len(input_list)}] 分析失败: {bvid}（无有效报告）")
+        except Exception as e:
+            item.error = str(e)
+            logger.error(f"比对分析单项失败: {raw} - {e}")
+            progress("比对分析", f"[{idx}/{len(input_list)}] 分析失败: {raw} - {e}")
+
+    zip_paths = [item.zip_path for item in result.items if item.ok and item.zip_path]
+    if not zip_paths:
+        raise RuntimeError("没有任何视频产生有效报告，无法进行比对分析")
+
+    progress("语料库聚合", f"开始聚合 {len(zip_paths)} 个视频报告...")
+    builder = CorpusBuilder()
+    build_result = builder.build_from_zips(zip_paths, output_dir)
+    result.summary_csv_path = build_result.csv_path
+    for warning in build_result.warnings:
+        progress("语料库聚合", warning)
+
+    settings = get_settings()
+    extra_files: List[str] = []
+    if settings.ENABLE_LLM_ANALYSIS_REPORT:
+        from .reporter import Reporter
+
+        corpus_metadata = builder.build_snapshot_metadata(build_result)
+        llm_report_path = await Reporter(output_dir=build_result.output_dir).generate_corpus_analysis_report(
+            build_result.csv_path, build_result.videos_csv_path, corpus_metadata
+        )
+        if llm_report_path:
+            extra_files.append(llm_report_path)
+            progress("语料库聚合", "语料库 LLM 比较分析报告已生成")
+        else:
+            progress("语料库聚合", "语料库 LLM 分析报告生成失败（不影响聚合产物）")
+
+    result.snapshot_path = builder.package_snapshot(build_result, extra_files)
+    result.snapshot_valid = build_result.zip_valid
+    progress("语料库聚合", f"聚合完成: {build_result.csv_path}")
+    return result
