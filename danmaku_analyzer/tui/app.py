@@ -1,6 +1,7 @@
 """TUI 主应用 - DanmakuScope 终端交互界面（OpenCode 风格）"""
 
 import re
+import threading
 
 from textual import events
 from textual.app import App, ComposeResult
@@ -229,6 +230,13 @@ class DanmakuTUI(App):
         panel.insert(prefix + text)
         panel.move_cursor(panel.document.end)
 
+    def _log_lines_threadsafe(self, lines: list[str]) -> None:
+        """进度回调可能在应用线程或工作线程触发，按线程路由避免 call_from_thread 同线程报错"""
+        if threading.get_ident() == self._thread_id:
+            self._log_lines(lines)
+        else:
+            self.call_from_thread(self._log_lines, lines)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-analyze":
             self.action_analyze()
@@ -296,7 +304,7 @@ class DanmakuTUI(App):
         self._log_lines([f"▶ {i18n.t('log.start')} {input_str}"])
 
         def progress_callback(stage: str, message: str):
-            self.call_from_thread(self._log_lines, [f"  ✔ {stage} {message}"])
+            self._log_lines_threadsafe([f"  ✔ {stage} {message}"])
 
         try:
             result = await analyze_video(
@@ -341,7 +349,7 @@ class DanmakuTUI(App):
         self._log_lines([f"▶ {i18n.t('compare.begin', count=len(inputs))}"])
 
         def progress_callback(stage: str, message: str):
-            self.call_from_thread(self._log_lines, [f"  ✔ {stage} {message}"])
+            self._log_lines_threadsafe([f"  ✔ {stage} {message}"])
 
         try:
             result = await compare_videos(inputs, reuse=reuse, progress=progress_callback)
