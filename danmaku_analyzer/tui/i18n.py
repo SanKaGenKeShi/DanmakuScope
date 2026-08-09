@@ -189,6 +189,7 @@ _STRINGS = {
     "binding.quit": "退出",
     "mode.single": "个体分析",
     "mode.compare": "比对分析",
+    "mode.log": "日志",
     "terminal.opened": "已打开系统终端，请在新窗口扫码登录",
     "terminal.open_failed": "打开系统终端失败，请手动在终端运行 danmaku-analyzer login",
     "compare.placeholder": "粘贴多个 BV / AV / 链接，一行一条（或用逗号、空格分隔）\nEnter 换行，Alt+Enter 开始比对",

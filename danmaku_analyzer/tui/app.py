@@ -86,6 +86,14 @@ class DanmakuTUI(App):
         padding: 0 1;
     }
 
+    #tui-log-panel {
+        display: none;
+        margin: 1 2;
+        border: round $secondary;
+        background: $surface;
+        padding: 0 1;
+    }
+
     #bottom-bar {
         dock: bottom;
         height: 3;
@@ -172,7 +180,9 @@ class DanmakuTUI(App):
             with Horizontal(id="mode-buttons"):
                 yield Button(i18n.t("mode.single"), variant="primary", id="btn-mode-single")
                 yield Button(i18n.t("mode.compare"), id="btn-mode-compare")
+                yield Button(i18n.t("mode.log"), id="btn-mode-log")
         yield TextArea("", id="log-panel", read_only=True, show_line_numbers=False)
+        yield TextArea("", id="tui-log-panel", read_only=True, show_line_numbers=False)
         with Horizontal(id="compare-controls"):
             with Vertical(id="compare-input-col"):
                 with Horizontal(id="compare-options"):
@@ -198,6 +208,29 @@ class DanmakuTUI(App):
         self._apply_binding_labels()
         self.query_one("#bvid-input", Input).focus()
         self._greet()
+        self._tui_log_sink_id = logger.add(self._tui_log_sink, level="INFO")
+
+    def on_unmount(self) -> None:
+        sink_id = getattr(self, "_tui_log_sink_id", None)
+        if sink_id is not None:
+            logger.remove(sink_id)
+
+    def _tui_log_sink(self, message) -> None:
+        """loguru sink：将日志行转发到专属日志面板（任意线程触发均安全）"""
+        record = message.record
+        name = record["extra"].get("name", record["module"])
+        line = f'{record["time"].strftime("%H:%M:%S")} | {record["level"].name:<8} | {name} | {record["message"]}'
+        if threading.get_ident() == self._thread_id:
+            self._append_tui_log(line)
+        else:
+            self.call_from_thread(self._append_tui_log, line)
+
+    def _append_tui_log(self, line: str) -> None:
+        panel = self.query_one("#tui-log-panel", TextArea)
+        prefix = "\n" if panel.text else ""
+        panel.move_cursor(panel.document.end)
+        panel.insert(prefix + line)
+        panel.move_cursor(panel.document.end)
 
     def _greet(self) -> None:
         from .. import __version__
@@ -248,6 +281,8 @@ class DanmakuTUI(App):
             self._set_mode("single")
         elif event.button.id == "btn-mode-compare":
             self._set_mode("compare")
+        elif event.button.id == "btn-mode-log":
+            self._set_mode("log")
         elif event.button.id == "btn-compare":
             self.action_compare()
 
@@ -255,13 +290,16 @@ class DanmakuTUI(App):
         self.action_compare()
 
     def _set_mode(self, mode: str) -> None:
-        """切换个体/比对两种模式：内容区与底部输入区互斥显示"""
+        """切换个体/比对/日志三种模式：内容区与底部输入区互斥显示"""
         compare = mode == "compare"
         self.query_one("#bottom-bar").styles.display = "block" if mode == "single" else "none"
         self.query_one("#compare-controls").styles.display = "block" if compare else "none"
+        self.query_one("#log-panel").styles.display = "none" if mode == "log" else "block"
+        self.query_one("#tui-log-panel").styles.display = "block" if mode == "log" else "none"
         for btn_mode, btn_name in (
             ("single", "#btn-mode-single"),
             ("compare", "#btn-mode-compare"),
+            ("log", "#btn-mode-log"),
         ):
             self.query_one(btn_name, Button).variant = "primary" if mode == btn_mode else "default"
         if compare:
@@ -591,5 +629,23 @@ class DanmakuTUI(App):
 
 
 def run_tui() -> None:
-    """TUI 入口（pyproject.toml [project.scripts] 指向此处）"""
+    """TUI 入口（pyproject.toml [project.scripts] 指向此处）：移除控制台日志输出，第三方 stdlib 日志桥接入 loguru"""
+    import logging
+
+    from loguru import logger as loguru_logger
+
+    from ..utils.logger import setup_tui_logger
+
+    setup_tui_logger()
+
+    class _InterceptHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                level = loguru_logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            loguru_logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+    logging.basicConfig(handlers=[_InterceptHandler()], level=logging.INFO, force=True)
+
     DanmakuTUI().run()

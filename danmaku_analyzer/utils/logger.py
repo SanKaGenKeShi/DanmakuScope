@@ -52,3 +52,21 @@ def setup_logger(
 def get_logger(name: str) -> Logger:
     """获取绑定模块名的日志记录器"""
     return logger.bind(name=name)
+
+
+def setup_tui_logger(level: str = "INFO") -> None:
+    """TUI 专用：移除 loguru 默认控制台输出避免刷掉界面，仅保留文件 sink（面板展示由 App 自挂 sink）"""
+    settings = get_settings()
+
+    logger.remove()
+
+    log_dir = settings.resolve_data_path(settings.LOG_DIR)
+    os.makedirs(log_dir, exist_ok=True)
+    logger.add(
+        os.path.join(log_dir, "danmaku_analyzer.log"),
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        level=level,
+        rotation="10 MB",
+        retention="7 days",
+        encoding="utf-8",
+    )
