@@ -3,7 +3,7 @@
 严禁跨段提取，最大 token 数限制
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 from dataclasses import dataclass
 
 from .config import get_settings

@@ -215,6 +215,65 @@ async def _generate_corpus_llm_report(builder, result) -> Optional[str]:
 
 
 @cli.command()
+@click.argument('input_list', nargs=-1)
+@click.option('--output', '-o', default=None, help='输出目录')
+@click.option('--reuse/--no-reuse', default=True, help='复用过往分析数据（默认复用）')
+@click.option('--resume', is_flag=True, default=False, help='从进度文件（DATA_ROOT/scheduler/progress.jsonl）继续，跳过已完成视频')
+def compare(input_list: tuple, output: Optional[str], reuse: bool, resume: bool):
+    """跨视频比对分析：逐个分析 + 语料库聚合 + 跨分区推断统计（Kruskal-Wallis/逐对 MWU/Cliff's delta）"""
+    if not input_list:
+        console.print("[red]请提供至少一个输入（BV号/URL/AV号）[/red]")
+        sys.exit(1)
+
+    try:
+        asyncio.run(_compare_async(list(input_list), output, reuse, resume))
+    except Exception as e:
+        console.print(f"[red]比对分析失败: {e}[/red]")
+        logger.error(f"比对分析失败: {e}", exc_info=True)
+        sys.exit(1)
+
+
+async def _compare_async(input_list: List[str], output: Optional[str], reuse: bool, resume: bool):
+    """异步批量比对：单项失败不中断批次，最终以退出码反映失败数"""
+    from .pipeline import compare_videos
+
+    def rich_progress_callback(stage: str, message: str):
+        console.print(f"[cyan]{stage}[/cyan]: {message}")
+
+    console.print(f"[bold]开始比对分析 {len(input_list)} 个视频（复用: {'开' if reuse else '关'}，断点续传: {'开' if resume else '关'}）[/bold]")
+    result = await compare_videos(
+        input_list, reuse=reuse, output_dir=output,
+        progress=rich_progress_callback, resume=resume,
+    )
+
+    table = Table(title="比对分析逐项结果")
+    table.add_column("输入", style="cyan", max_width=30, overflow="ellipsis")
+    table.add_column("BV号")
+    table.add_column("状态")
+    table.add_column("报告 ZIP", max_width=50, overflow="ellipsis")
+    for item in result.items:
+        if item.ok:
+            status = "[green]复用[/green]" if item.reused else "[green]完成[/green]"
+        else:
+            status = f"[red]失败: {item.error}[/red]"
+        table.add_row(item.raw_input, item.bvid, status, item.zip_path)
+    console.print(table)
+
+    if result.summary_csv_path:
+        console.print(f"  比对表: {result.summary_csv_path}")
+    if result.statistics_csv_path:
+        console.print(f"  推断检验: {result.statistics_csv_path}")
+    if result.snapshot_path:
+        console.print(f"  语料库快照: {result.snapshot_path}")
+
+    fail_count = sum(1 for item in result.items if not item.ok)
+    if fail_count:
+        console.print(f"[red]比对分析完成，{fail_count}/{len(result.items)} 个失败[/red]")
+        sys.exit(1)
+    console.print("[bold green]比对分析完成[/bold green]")
+
+
+@cli.command()
 @click.argument('partitions', nargs=-1)
 @click.option('--per-partition', default=10, help='每个分区的候选视频数（默认10）')
 @click.option('--gaps-only', is_flag=True, default=False, help='仅显示语料库缺口，不联网拉取候选')
@@ -376,6 +435,12 @@ def config():
     table.add_row("LLM分析报告", "开启" if settings.ENABLE_LLM_ANALYSIS_REPORT else "关闭")
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
         table.add_row("分析报告模型", llm_cfg.ANALYSIS_REPORT_LLM_MODEL)
+    table.add_row("语料库级推断统计", "开启" if settings.ENABLE_CORPUS_STATISTICS else "关闭")
+    table.add_row("每分区最少视频数", str(settings.CORPUS_MIN_VIDEOS_PER_PARTITION))
+    table.add_row("冷热区策略", settings.CORPUS_ZONE_POLICY)
+    table.add_row("按发布时间分桶", "开启" if settings.ENABLE_TEMPORAL_GROUPING else "关闭")
+    if settings.ENABLE_TEMPORAL_GROUPING:
+        table.add_row("分桶粒度", settings.TEMPORAL_GRANULARITY)
     
     console.print(table)
 

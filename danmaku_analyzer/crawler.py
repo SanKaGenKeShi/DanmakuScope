@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_serializer
 
 from bilibili_api import video, Credential, HEADERS
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .partitions import TID_TO_TNAME
 from .utils.logger import get_logger
@@ -103,8 +104,9 @@ class BilibiliCrawler:
             logger.error(f"获取视频元数据失败: {e}")
             raise
     
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def fetch_danmaku(self, bvid: str, cid: Optional[int] = None) -> List[DanmakuItem]:
-        """protobuf 分段接口拉取全量弹幕，失败回退 XML"""
+        """protobuf 分段接口拉取全量弹幕，失败回退 XML；两路均失败时 tenacity 指数退避重试"""
         logger.info(f"开始获取弹幕（protobuf 分段接口），BVID: {bvid}")
         
         try:

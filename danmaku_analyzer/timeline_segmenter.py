@@ -4,7 +4,7 @@
 """
 
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List
 from dataclasses import dataclass
 
 import ruptures

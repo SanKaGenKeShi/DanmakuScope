@@ -10,7 +10,7 @@ from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_PLACEHOLDER_KEYS = ("sk-xxx", "sk-yyy", "sk-zzz", "")
+_PLACEHOLDER_KEYS = ("sk-xxx", "sk-yyy", "sk-zzz")
 
 
 def _check_api_key(name: str, api_key: str) -> None:
@@ -20,7 +20,8 @@ def _check_api_key(name: str, api_key: str) -> None:
 
 
 def create_async_client(base_url: str, api_key: str, timeout: float = 60.0) -> AsyncOpenAI:
-    return AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+    """空 key（本地推理后端如 Ollama）以 ollama 约定哑值构造，openai SDK 拒绝空串凭证"""
+    return AsyncOpenAI(base_url=base_url, api_key=api_key or "ollama", timeout=timeout)
 
 
 def complex_async_client(timeout: float = 60.0) -> AsyncOpenAI:
@@ -38,11 +39,11 @@ def simple_async_client(timeout: float = 60.0) -> AsyncOpenAI:
 
 
 def analysis_report_async_client(timeout: float = 120.0) -> AsyncOpenAI:
-    """分析报告客户端（ANALYSIS_REPORT_LLM 独立配置；空值以占位符构造，实际调用将失败并已告警）"""
+    """分析报告客户端（ANALYSIS_REPORT_LLM 独立配置）"""
     cfg = get_llm_settings()
     _check_api_key("ANALYSIS_REPORT_LLM_API_KEY", cfg.ANALYSIS_REPORT_LLM_API_KEY)
     return create_async_client(
         cfg.ANALYSIS_REPORT_LLM_BASE_URL or "https://api.openai.com/v1",
-        cfg.ANALYSIS_REPORT_LLM_API_KEY or "sk-zzz",
+        cfg.ANALYSIS_REPORT_LLM_API_KEY,
         timeout,
     )

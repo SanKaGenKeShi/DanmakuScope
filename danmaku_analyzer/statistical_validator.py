@@ -1,15 +1,20 @@
 """
-统计验证模块 - 描述性统计 + 置信区间 + 可选显著性检验
-包含 Wilson 置信区间、描述性统计、Mann-Whitney U 检验（可选）；
-语料库级比较检验（Kruskal-Wallis/Dunn 等）由 corpus_visualizer 生成的 R 脚本执行，不在 Python 侧重复实现
+统计验证模块 - 描述性统计 + 置信区间 + 可选显著性检验 + 语料库级推断统计
+Wilson 置信区间、描述性统计、Mann-Whitney U 检验（单视频段间，可选）；
+语料库级跨分区推断（Kruskal-Wallis + 逐对 Mann-Whitney U + Cliff's delta，基于 scipy）
+由 corpus_compare 编排，输出未校正 p 值的 statistical_tests.csv
 """
 
+import itertools
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
-from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass
+import pandas as pd
 from scipy import stats
 
 from .config import get_settings
+from .corpus_builder import SCALAR_FIELDS
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -78,6 +83,28 @@ class SignificanceTestResult:
             "alpha": self.alpha,
             "note": self.note,
         }
+
+
+STATISTICAL_TESTS_COLUMNS = [
+    "metric", "test_type", "group1", "group2", "n1", "n2",
+    "statistic", "p_value", "effect_size", "effect_magnitude", "note",
+]
+
+UNCORRECTED_P_NOTE = "未校正 p 值（未实施多重比较校正）"
+
+
+@dataclass
+class ComparisonResult:
+    """语料库级比较检验结果：行集合 + 落盘能力"""
+    rows: List[Dict] = field(default_factory=list)
+    enabled: bool = True
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return pd.DataFrame(self.rows, columns=STATISTICAL_TESTS_COLUMNS)
+
+    def to_csv(self, path: str) -> str:
+        self.to_dataframe().to_csv(path, index=False, encoding='utf-8-sig')
+        return path
 
 
 class StatisticalValidator:
@@ -223,5 +250,139 @@ class StatisticalValidator:
             return True, f"样本量充足 ({sample_size} >= {min_size})"
         else:
             return False, f"样本量不足 ({sample_size} < {min_size})，跳过置信区间，标记为 insufficient_sample"
+
+    def kruskal_wallis_test(self, groups: Dict[str, List[float]], metric: str) -> Optional[Dict]:
+        """Kruskal-Wallis H 检验（scipy），返回未校正 p 值的 CSV 行；可检验分组 < 2 返回 None"""
+        names = sorted(groups)
+        if len(names) < 2:
+            return None
+        samples = [groups[name] for name in names]
+        if len({v for s in samples for v in s}) <= 1:
+            statistic, p_value = 0.0, 1.0
+            note = UNCORRECTED_P_NOTE + "；全部观测值相同，检验退化"
+        else:
+            statistic, p_value = stats.kruskal(*samples)
+            note = UNCORRECTED_P_NOTE
+        return {
+            "metric": metric,
+            "test_type": "Kruskal-Wallis",
+            "group1": "",
+            "group2": "",
+            "n1": sum(len(s) for s in samples),
+            "n2": "",
+            "statistic": round(float(statistic), 4),
+            "p_value": round(float(p_value), 6),
+            "effect_size": "",
+            "effect_magnitude": "",
+            "note": note,
+        }
+
+    def cliff_delta(self, sample1: List[float], sample2: List[float]) -> float:
+        """Cliff's delta 效应量（纯算术实现）：(x>y 对数 - x<y 对数) / (n1*n2)"""
+        more = less = 0
+        for x in sample1:
+            for y in sample2:
+                if x > y:
+                    more += 1
+                elif x < y:
+                    less += 1
+        return (more - less) / (len(sample1) * len(sample2))
+
+    @staticmethod
+    def _cliff_delta_magnitude(delta: float) -> str:
+        """效应量分级阈值参照 Romano et al. (2006)"""
+        d = abs(delta)
+        if d < 0.147:
+            return "negligible"
+        if d < 0.33:
+            return "small"
+        if d < 0.474:
+            return "medium"
+        return "large"
+
+    def pairwise_mann_whitney(self, groups: Dict[str, List[float]], metric: str) -> List[Dict]:
+        """逐对 Mann-Whitney U 两两比较（scipy），输出未校正 p 值并附 Cliff's delta"""
+        rows = []
+        for name1, name2 in itertools.combinations(sorted(groups), 2):
+            a, b = groups[name1], groups[name2]
+            if len(set(a) | set(b)) <= 1:
+                statistic, p_value = len(a) * len(b) / 2, 1.0
+                note = UNCORRECTED_P_NOTE + "；全部观测值相同，检验退化"
+            else:
+                statistic, p_value = stats.mannwhitneyu(a, b, alternative='two-sided')
+                note = UNCORRECTED_P_NOTE
+            delta = self.cliff_delta(a, b)
+            rows.append({
+                "metric": metric,
+                "test_type": "Mann-Whitney U",
+                "group1": name1,
+                "group2": name2,
+                "n1": len(a),
+                "n2": len(b),
+                "statistic": round(float(statistic), 4),
+                "p_value": round(float(p_value), 6),
+                "effect_size": round(delta, 4),
+                "effect_magnitude": self._cliff_delta_magnitude(delta),
+                "note": note,
+            })
+        return rows
+
+    def corpus_compare(self, csv_path: str, groupby_col: str = "tname") -> ComparisonResult:
+        """语料库级跨分区推断编排：消费视频级观测表（勿用组级汇总表），
+        分区视频数 < CORPUS_MIN_VIDEOS_PER_PARTITION 标 insufficient_sample 跳过，
+        有效分组 < 2 输出空结果并告警；仅受 ENABLE_CORPUS_STATISTICS 控制"""
+        settings = get_settings()
+        if not settings.ENABLE_CORPUS_STATISTICS:
+            logger.info("语料库级推断统计未启用（ENABLE_CORPUS_STATISTICS=False），跳过 corpus_compare")
+            return ComparisonResult(rows=[], enabled=False)
+
+        df = pd.read_csv(csv_path, encoding='utf-8-sig')
+        if groupby_col not in df.columns:
+            raise ValueError(f"观测表缺少分组列 {groupby_col}: {csv_path}")
+        df = df[df[groupby_col].notna() & (df[groupby_col].astype(str).str.strip() != "")]
+
+        min_videos = settings.CORPUS_MIN_VIDEOS_PER_PARTITION
+        counts = df.groupby(groupby_col).size()
+        valid = sorted(counts[counts >= min_videos].index.astype(str).tolist())
+        if len(valid) < 2:
+            logger.warning(f"有效分组不足（{len(valid)} < 2，门槛：每分区视频数 >= {min_videos}），跳过语料库级推断检验，输出空 statistical_tests.csv")
+            return ComparisonResult(rows=[])
+
+        rows: List[Dict] = []
+        for name in sorted(counts.index.astype(str)):
+            n = int(counts[name])
+            sufficient = n >= min_videos
+            rows.append({
+                "metric": "",
+                "test_type": "sample_status",
+                "group1": name,
+                "group2": "",
+                "n1": n,
+                "n2": "",
+                "statistic": "",
+                "p_value": "",
+                "effect_size": "",
+                "effect_magnitude": "",
+                "note": "sample_sufficient" if sufficient else f"insufficient_sample（视频数 {n} < {min_videos}，不参与检验）",
+            })
+
+        sub = df[df[groupby_col].astype(str).isin(valid)]
+        for metric in SCALAR_FIELDS:
+            if metric not in sub.columns:
+                continue
+            groups: Dict[str, List[float]] = {}
+            for name in valid:
+                values = pd.to_numeric(sub.loc[sub[groupby_col].astype(str) == name, metric], errors='coerce').dropna().tolist()
+                if len(values) >= 2:
+                    groups[name] = values
+            if len(groups) < 2:
+                continue
+            kw_row = self.kruskal_wallis_test(groups, metric)
+            if kw_row:
+                rows.append(kw_row)
+            rows.extend(self.pairwise_mann_whitney(groups, metric))
+
+        logger.info(f"语料库级推断检验完成: {len(valid)} 个有效分区，{len(rows)} 行结果（未校正 p 值）")
+        return ComparisonResult(rows=rows)
 
 

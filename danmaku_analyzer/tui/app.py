@@ -399,6 +399,8 @@ class DanmakuTUI(App):
                     self._log_lines([f"  • {item.raw_input}: {i18n.t('compare.item_failed')} {item.error}"])
             if result.summary_csv_path:
                 self._log_lines([f"  {i18n.t('compare.summary')}: {result.summary_csv_path}"])
+            if result.statistics_csv_path:
+                self._log_lines([f"  {i18n.t('compare.statistics')}: {result.statistics_csv_path}"])
             if result.snapshot_path:
                 self._log_lines([f"  {i18n.t('compare.snapshot')}: {result.snapshot_path}"])
             self.notify(i18n.t("compare.done"), severity="information")
@@ -456,6 +458,7 @@ class DanmakuTUI(App):
         lines.append(
             f"  [{i18n.t('cfg.section_corpus')}] "
             f"{i18n.t('compare.reuse')}: {on if load_prefs().get('compare_reuse', True) else off} | "
+            f"{i18n.t('settings.corpus_statistics')}: {flag(settings.ENABLE_CORPUS_STATISTICS)} | "
             f"{i18n.t('settings.corpus_min_videos')}: {settings.CORPUS_MIN_VIDEOS_PER_PARTITION} | "
             f"{i18n.t('settings.corpus_zone_policy')}: {settings.CORPUS_ZONE_POLICY} | "
             f"{i18n.t('settings.corpus_temporal')}: {flag(settings.ENABLE_TEMPORAL_GROUPING)} | "

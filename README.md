@@ -2,7 +2,7 @@
 
 B 站弹幕社会语言学分析工具（命令行 + 终端图形界面）。采集弹幕及视频元数据，经硬统计与 LLM 软标签双通道分析后，按官方分区（tname）聚合输出交叉统计表，为社会语言学/语料库语言学实证研究提供可溯源、可复核的语料数据。
 
-当前版本：**v0.3.0-beta**
+当前版本：**v0.3.1-beta**
 
 ---
 
@@ -14,10 +14,10 @@ B 站弹幕社会语言学分析工具（命令行 + 终端图形界面）。采
 | 预处理 | 用户级去重、基于密度的时序动态切分（ruptures PELT）                                               |
 | 硬统计 | 词类分布、音节结构、实词密度、正字法变体率（纯正则）                                              |
 | LLM 软标签 | 情感、合作原则、互动类型、句类、正字法状态（双路推理 + JSD 共识）                                 |
-| 统计推断 | Wilson 置信区间 + 样本量校验，可选 Mann-Whitney U 探索性检验                                      |
+| 统计推断 | Wilson 置信区间 + 样本量校验，可选单视频段间 Mann-Whitney U（默认关闭）                   |
 | 分析报告 | 可选调用 LLM 生成社会语言学语料分析报告                                                           |
 | 产出打包 | 全部产出自动打包为 `[BV号]视频标题.zip`                                                           |
-| 语料库比较 | 跨视频语料库级聚合 + Kruskal-Wallis/Dunn 检验 + 分区缺口补足建议 + R/ggplot2 可视化脚本 |
+| 语料库比较 | 跨视频语料库级聚合 + KW/Mann-Whitney U/Cliff's delta 推断统计 + 分区缺口补足建议 + R 可视化 |
 | TUI 界面 | Textual 终端图形界面：个体分析/比对分析双模式、设置中心（含参数说明与 LLM 连接检测）、设置持久化 |
 
 ---
@@ -38,7 +38,7 @@ B 站弹幕社会语言学分析工具（命令行 + 终端图形界面）。采
 ```bash
 git clone https://github.com/SanKaGenKeShi/DanmakuScope.git
 cd DanmakuScope
-pip install -e .
+pip install .
 # 开发环境：pip install -e ".[dev]"
 ```
 
@@ -108,6 +108,15 @@ danmaku-analyzer config
 danmaku-analyzer login
 danmaku-analyzer account
 
+# 跨视频比对分析（逐个分析 + 语料库聚合 + 推断统计，复用已有报告）
+danmaku-analyzer compare BV1xx411c7mD BV1yy411c7mE
+
+# 全部重新分析，不复用过往数据
+danmaku-analyzer compare BV1xx411c7mD --no-reuse
+
+# 断点续传：从进度文件跳过已完成视频
+danmaku-analyzer compare BV1xx411c7mD BV1yy411c7mE --resume
+
 # 语料库级聚合（回读单视频 ZIP，可选 --from-index 从索引聚合 / --with-r 生成 R 脚本）
 danmaku-analyzer corpus "[BV1xx]标题.zip" "[BV1yy]标题.zip" --with-r
 
@@ -167,7 +176,7 @@ danmaku_analyzer/
 ├── llm_factory.py          # 统一 LLM 客户端工厂
 ├── report_generator.py     # LLM 分析报告生成器
 ├── aggregator.py           # 嵌套聚合（分区/热区）
-├── statistical_validator.py # 统计推断（Wilson CI + 语料库级 KW/Dunn/卡方检验）
+├── statistical_validator.py # 统计推断（Wilson CI + 语料库级 KW/MWU/Cliff's delta）
 ├── reporter.py             # 报告导出 + ZIP 打包
 ├── cache_manager.py        # 缓存管理（Pickle, 12h TTL）
 ├── corpus_store.py         # 语料库索引（corpus_index.json）
@@ -177,6 +186,9 @@ danmaku_analyzer/
 ├── tui/                    # TUI 子包（Textual：主应用/文案与偏好/设置中心）
 ├── utils/                  # 工具子包（日志/解析器/Token 计数）
 └── lexicon/                # 自定义词典 + 报告规范
+tests/
+├── test_statistics.py      # 语料库级推断统计（KW/MWU/Cliff's delta + corpus_compare）
+└── test_temporal.py        # 历时维度分桶（ENABLE_TEMPORAL_GROUPING + 统计分层）
 ```
 
 ---

@@ -74,6 +74,7 @@ _STRINGS = {
         "微语境窗口": "为每条弹幕构建语境参照的时间范围（秒）。",
         "微语境最大 token": "语境注入提示词的 token 上限。",
         "复用过往分析数据": "比对分析时，索引中已有报告 ZIP 的视频直接复用；关闭则全部重新分析。",
+        "语料库级推断统计": "比对聚合后计算跨分区 Kruskal-Wallis + 逐对 Mann-Whitney U + Cliff's delta 并输出 statistical_tests.csv；关闭则仅产出聚合表。",
         "每分区最少视频数": "语料库比较时视频数少于此值的分区结果仅供参考。",
         "冷热区策略": "仅热区：只聚合热区；两区各保留：冷热区各保留一行；加权合并：按弹幕数加权合并。",
         "按发布时间分桶": "开启后语料库聚合增加历时维度分组。",
@@ -142,6 +143,7 @@ _STRINGS = {
     "settings.test_failed": "LLM 连接失败: {error}",
     "settings.key_copied": "内容已复制到剪贴板",
     "settings.corpus_min_videos": "每分区最少视频数",
+    "settings.corpus_statistics": "语料库级推断统计",
     "settings.corpus_zone_policy": "冷热区策略",
     "settings.corpus_temporal": "按发布时间分桶",
     "settings.corpus_granularity": "分桶粒度",
@@ -202,6 +204,7 @@ _STRINGS = {
     "compare.item_reused": "已复用过往报告",
     "compare.item_failed": "失败",
     "compare.summary": "比对表",
+    "compare.statistics": "推断检验",
     "compare.snapshot": "语料库快照",
     "error.no_report": "分析未产生有效报告: {input}",
 }
@@ -214,6 +217,7 @@ PERSIST_SETTINGS_KEYS = (
     "CONTEXT_TIME_WINDOW", "MAX_CONTEXT_TOKENS",
     "CORPUS_MIN_VIDEOS_PER_PARTITION", "CORPUS_ZONE_POLICY",
     "ENABLE_TEMPORAL_GROUPING", "TEMPORAL_GRANULARITY",
+    "ENABLE_CORPUS_STATISTICS",
 )
 PERSIST_LLM_KEYS = (
     "ENABLE_DUAL_PATH", "JSD_THRESHOLD_LOW", "JSD_THRESHOLD_MEDIUM",

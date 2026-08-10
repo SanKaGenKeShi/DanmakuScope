@@ -6,7 +6,7 @@ LLM 客户端模块 - 双路推理 + 四维输出（含正字法状态）
 
 import json
 import asyncio
-from typing import List, Dict, Any
+from typing import Dict, Any
 
 import regex
 from openai import AsyncOpenAI

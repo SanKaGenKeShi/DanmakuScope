@@ -6,7 +6,6 @@
 import pytest
 import json
 import numpy as np
-from dataclasses import dataclass
 
 from danmaku_analyzer.hard_metrics import HardMetricsAnalyzer, HardMetricsResult
 from danmaku_analyzer.aggregator import Aggregator, AggregatedData, DanmakuRecord

@@ -108,6 +108,4 @@ data/logs/*.log
 *cookie*.json
 *.cookie
 
-!danmaku_analyzer/utils/token_counter.py
-
 .tmp_*

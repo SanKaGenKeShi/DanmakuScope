@@ -21,6 +21,12 @@ from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+_RE_UPPERCASE = regex.compile(r'[A-Z]{2,}')
+_RE_NUMBER = regex.compile(r'\d{2,}')
+_RE_EMOTICON = regex.compile(r'[（(][\u4e00-\u9fff\w\s・ω･｡]+[）)]')
+_RE_PUNCTUATION = regex.compile(r'[!?~！？～]')
+_RE_NON_WORD = regex.compile(r'[^\w\s]')
+
 _POS_ALIASES = {
     "noun": "n", "verb": "v", "adjective": "a", "adj": "a",
     "adverb": "d", "adv": "d", "pronoun": "r", "auxiliary": "v",
@@ -200,13 +206,8 @@ class HardMetricsAnalyzer:
         number_symbol_count = 0
         emoticon_count = 0
 
-        uppercase_pattern = regex.compile(r'[A-Z]{2,}')
-        number_pattern = regex.compile(r'\d{2,}')
-        emoticon_pattern = regex.compile(r'[（(][\u4e00-\u9fff\w\s・ω･｡]+[）)]')
-        punctuation_pattern = regex.compile(r'[!?~！？～]')
-
         for danmaku, words in zip(danmaku_list, tokenized_list):
-            has_punctuation = bool(punctuation_pattern.search(danmaku))
+            has_punctuation = bool(_RE_PUNCTUATION.search(danmaku))
             has_emoji = bool(emoji.emoji_count(danmaku) > 0)
             if has_punctuation or has_emoji:
                 punctuation_emoji_count += 1
@@ -226,13 +227,13 @@ class HardMetricsAnalyzer:
                 else:
                     syllable_counter['三+音节'] += 1
                 
-                clean_word = regex.sub(r'[^\w\s]', '', word)
+                clean_word = _RE_NON_WORD.sub('', word)
                 total_chars += len(clean_word)
             
             # 正字法变体统计（基于整个弹幕）
-            uppercase_abbr_count += len(uppercase_pattern.findall(danmaku))
-            number_symbol_count += len(number_pattern.findall(danmaku))
-            emoticon_count += len(emoticon_pattern.findall(danmaku))
+            uppercase_abbr_count += len(_RE_UPPERCASE.findall(danmaku))
+            number_symbol_count += len(_RE_NUMBER.findall(danmaku))
+            emoticon_count += len(_RE_EMOTICON.findall(danmaku))
         
         total_danmaku = len(danmaku_list)
         

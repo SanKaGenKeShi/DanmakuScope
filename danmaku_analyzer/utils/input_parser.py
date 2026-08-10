@@ -4,7 +4,7 @@
 """
 
 import re
-from typing import Optional, Literal
+from typing import Optional
 from dataclasses import dataclass
 from enum import Enum
 

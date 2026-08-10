@@ -22,8 +22,9 @@ class Settings(BaseSettings):
     ENABLE_FREQ_BASED_SAMPLING: bool = Field(default=False, description="是否按频次排序采样，默认False使用每段前N条")
     TOP_N: int = Field(default=10, description="频次排序采样时取前N条弹幕")
 
-    ENABLE_SIGNIFICANCE_TESTING: bool = Field(default=False, description="是否启用显著性检验，默认关闭，仅探索")
+    ENABLE_SIGNIFICANCE_TESTING: bool = Field(default=False, description="是否启用单视频段间显著性检验，默认关闭，仅探索")
     SIGNIFICANCE_ALPHA: float = Field(default=0.05, description="显著性检验的 alpha 水平")
+    ENABLE_CORPUS_STATISTICS: bool = Field(default=True, description="是否启用语料库级跨分区推断统计（KW + 逐对 MWU + Cliff's delta），样本量满足最低要求时默认开启")
 
     CORPUS_MIN_VIDEOS_PER_PARTITION: int = Field(default=3, description="语料库比较时每分区最少视频数，少于此不参与比较")
     CORPUS_ZONE_POLICY: Literal["hot_only", "all", "weighted"] = Field(default="hot_only", description="语料库聚合冷热区策略：hot_only 仅热区 / all 两区各保留 / weighted 按弹幕数加权合并")

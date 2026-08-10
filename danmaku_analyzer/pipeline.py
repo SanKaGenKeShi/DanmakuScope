@@ -8,10 +8,12 @@
 
 import asyncio
 import functools
+import json
 import os
 import zipfile
 from collections import Counter
-from typing import List, Dict, Optional, Callable
+from datetime import datetime
+from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass, field
 
 from .config import get_settings, Settings
@@ -449,7 +451,68 @@ class CompareResult:
     items: List[CompareItem] = field(default_factory=list)
     snapshot_path: Optional[str] = None
     summary_csv_path: Optional[str] = None
+    statistics_csv_path: Optional[str] = None
     snapshot_valid: bool = False
+
+
+STATISTICAL_TESTS_FILENAME = "statistical_tests.csv"
+PROGRESS_RELPATH = os.path.join("scheduler", "progress.jsonl")
+
+
+def _progress_file_path() -> str:
+    path = get_settings().resolve_data_path(PROGRESS_RELPATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
+def _append_progress(raw_input: str, bvid: str, zip_path: str, reused: bool):
+    """单项成功即追加 JSON Lines 记录，供中断后 --resume 无损继续"""
+    record = {
+        "input": raw_input, "bvid": bvid,
+        "status": "reused" if reused else "ok",
+        "zip_path": zip_path,
+        "timestamp": datetime.now().isoformat(timespec='seconds'),
+    }
+    with open(_progress_file_path(), 'a', encoding='utf-8') as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _load_progress() -> Dict[str, Dict]:
+    """读取进度文件，按 input/bvid 双键索引（后记录覆盖先记录）；文件缺失或行损坏仅跳过"""
+    path = _progress_file_path()
+    index: Dict[str, Dict] = {}
+    if not os.path.exists(path):
+        return index
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning(f"进度文件行损坏，跳过: {line[:80]}")
+                continue
+            for key in (record.get("input"), record.get("bvid")):
+                if key:
+                    index[key] = record
+    return index
+
+
+def _try_resume_item(item: CompareItem, index: Dict[str, Dict], key: str, progress: ProgressCallback, total: int, idx: int) -> bool:
+    """命中进度文件且报告 ZIP 仍存在时直接复用，返回是否命中"""
+    record = index.get(key)
+    if not record:
+        return False
+    zip_path = record.get("zip_path", "")
+    if not zip_path or not os.path.exists(zip_path):
+        return False
+    item.bvid = record.get("bvid", "") or item.bvid
+    item.zip_path = zip_path
+    item.reused = True
+    item.ok = True
+    progress("比对分析", f"[{idx}/{total}] 断点续传跳过（进度文件已完成）: {item.bvid or item.raw_input}")
+    return True
 
 
 def _find_reusable_zip(store: CorpusStore, bvid: str) -> str:
@@ -475,23 +538,31 @@ async def compare_videos(
     reuse: bool = True,
     output_dir: Optional[str] = None,
     progress: ProgressCallback = _default_progress,
+    resume: bool = False,
 ) -> CompareResult:
-    """批量比对：逐条执行个体分析（reuse 时索引中已有可用报告则复用跳过），随后语料库级聚合并打包快照"""
+    """批量比对：逐条执行个体分析（reuse 时索引中已有可用报告则复用跳过，resume 时命中进度文件则跳过），
+    随后语料库级聚合、推断统计并打包快照；单项成功即落盘 progress.jsonl"""
     result = CompareResult()
     store = CorpusStore()
+    progress_index = _load_progress() if resume else {}
 
     for idx, raw in enumerate(input_list, start=1):
         item = CompareItem(raw_input=raw)
         result.items.append(item)
         try:
+            if resume and _try_resume_item(item, progress_index, raw, progress, len(input_list), idx):
+                continue
             bvid = await _stage_resolve_input(raw, progress)
             item.bvid = bvid
+            if resume and _try_resume_item(item, progress_index, bvid, progress, len(input_list), idx):
+                continue
             if reuse:
                 zip_path = _find_reusable_zip(store, bvid)
                 if zip_path:
                     item.zip_path = zip_path
                     item.reused = True
                     item.ok = True
+                    _append_progress(raw, bvid, zip_path, reused=True)
                     progress("比对分析", f"[{idx}/{len(input_list)}] 复用已有报告: {bvid}")
                     continue
             analysis = await analyze_video(
@@ -504,6 +575,7 @@ async def compare_videos(
                 item.zip_path = analysis.zip_path
                 item.title = analysis.title
                 item.ok = True
+                _append_progress(raw, bvid, analysis.zip_path, reused=False)
                 progress("比对分析", f"[{idx}/{len(input_list)}] 分析完成: {bvid}")
             else:
                 item.error = "分析未产生有效报告"
@@ -526,6 +598,15 @@ async def compare_videos(
 
     settings = get_settings()
     extra_files: List[str] = []
+
+    if settings.ENABLE_CORPUS_STATISTICS:
+        comparison = StatisticalValidator().corpus_compare(build_result.videos_csv_path)
+        if comparison.enabled:
+            stats_csv = comparison.to_csv(os.path.join(build_result.output_dir, STATISTICAL_TESTS_FILENAME))
+            extra_files.append(stats_csv)
+            result.statistics_csv_path = stats_csv
+            progress("语料库聚合", f"推断检验结果已落盘: {STATISTICAL_TESTS_FILENAME}（{len(comparison.rows)} 行，未校正 p 值）")
+
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
         from .reporter import Reporter
 

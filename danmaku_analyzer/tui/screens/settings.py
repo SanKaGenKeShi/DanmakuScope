@@ -80,6 +80,7 @@ _CORPUS_DEFAULTS = {
     "CORPUS_ZONE_POLICY": "hot_only",
     "ENABLE_TEMPORAL_GROUPING": False,
     "TEMPORAL_GRANULARITY": "year",
+    "ENABLE_CORPUS_STATISTICS": True,
 }
 
 # 分析报告 LLM 未配置时界面直接展示配置现值（占位默认值），不再预填复杂任务值
@@ -305,6 +306,9 @@ class SettingsScreen(ModalScreen[bool]):
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("compare.reuse"))
                         yield Switch(load_prefs().get("compare_reuse", True), id="sw-compare-reuse")
+                    with Static(classes="setting-row"):
+                        yield Label(i18n.t("settings.corpus_statistics"))
+                        yield Switch(settings.ENABLE_CORPUS_STATISTICS, id="sw-corpus-statistics")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.corpus_min_videos"))
                         yield Input(str(settings.CORPUS_MIN_VIDEOS_PER_PARTITION), type="integer", id="inp-corpus-min-videos")
@@ -678,6 +682,7 @@ class SettingsScreen(ModalScreen[bool]):
         self._highlight_option("#zone-policy-options", _CORPUS_DEFAULTS["CORPUS_ZONE_POLICY"])
         self.query_one("#sw-temporal-grouping", Switch).value = _CORPUS_DEFAULTS["ENABLE_TEMPORAL_GROUPING"]
         self._highlight_option("#granularity-options", _CORPUS_DEFAULTS["TEMPORAL_GRANULARITY"])
+        self.query_one("#sw-corpus-statistics", Switch).value = _CORPUS_DEFAULTS["ENABLE_CORPUS_STATISTICS"]
         self.query_one("#sw-compare-reuse", Switch).value = True
         self.notify(i18n.t("settings.reset_done"), severity="information")
 
@@ -746,6 +751,7 @@ class SettingsScreen(ModalScreen[bool]):
         if zone_policy:
             settings.CORPUS_ZONE_POLICY = str(zone_policy.id)
         settings.ENABLE_TEMPORAL_GROUPING = self.query_one("#sw-temporal-grouping", Switch).value
+        settings.ENABLE_CORPUS_STATISTICS = self.query_one("#sw-corpus-statistics", Switch).value
         gran_options = self.query_one("#granularity-options", OptionList)
         granularity = gran_options.get_option_at_index(gran_options.highlighted)
         if granularity:
