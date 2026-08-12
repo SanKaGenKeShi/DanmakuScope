@@ -1,25 +1,25 @@
-"""TUI 文案模块 - 中文文案与偏好持久化"""
-
-import json
-import os
-
-from ..utils.logger import get_logger
-
-logger = get_logger(__name__)
+"""TUI 文案模块 - 中文文案"""
 
 _STRINGS = {
     "app.sub_title": "B站弹幕社会语言学分析",
-    "app.welcome": "欢迎使用 DanmakuScope",
     "app.desc": "B站弹幕社会语言学分析工具，为实证研究提供可溯源、可复核的语料数据。",
-    "app.quick_start": "快速开始：",
-    "app.step_input": "个体分析：在下方输入框粘贴 BV/AV 号或视频链接，按 Enter 或点击“开始分析”",
-    "app.step_analyze": "比对分析：标题栏切换“比对分析”，批量粘贴视频标识，点“开始比对”或 Alt+Enter",
-    "app.step_result": "分析进度与比对结果在此实时展示，报告自动打包为 ZIP",
-    "app.step_compare": "按 Ctrl+S 打开设置，可调整采样/LLM/语料库/通用参数并查阅参数说明",
-    "app.hint": "提示：输出面板支持鼠标选中后 Ctrl+C 复制；设置页含参数说明与凭证查看。",
+    "app.home_section_start": "快速开始",
+    "app.step_input": "个体分析：切换“个体分析”，在底部输入框粘贴 BV/AV 号或视频链接，按 Enter 或点击“开始分析”",
+    "app.step_analyze": "比对分析：切换“比对分析”，批量粘贴视频标识，点“开始比对”或 Alt+Enter",
+    "app.step_result": "个体分析与比对分析的输出各自独立展示，报告自动打包为 ZIP",
+    "app.step_compare": "按 Ctrl+S 打开设置，可调整采样/LLM/语料库/凭证参数并查阅参数说明",
+    "app.hint": "提示：输出面板与输入框支持鼠标选中后 Ctrl+C 复制；设置页含参数说明与凭证管理。",
+    "app.home_section_keys": "快捷键",
+    "app.shortcut_analyze": "开始分析（个体分析模式）",
+    "app.shortcut_settings": "打开设置",
+    "app.shortcut_paste": "从系统剪贴板粘贴到当前输入控件",
+    "app.shortcut_copy": "复制选中文本到系统剪贴板",
+    "app.shortcut_compare": "开始比对（比对输入区内）",
+    "app.shortcut_quit": "退出",
     "input.placeholder": "请输入BV/AV号或链接",
     "btn.analyze": "开始分析",
-    "btn.show_config": "查看配置",
+    "btn.clear": "清屏",
+    "btn.cancel_task": "中断任务",
     "btn.settings": "设置",
     "log.start": "开始分析",
     "log.done": "分析完成",
@@ -29,27 +29,11 @@ _STRINGS = {
     "log.groups": "聚合组",
     "log.zip": "报告 ZIP",
     "log.failed": "分析失败",
-    "log.config": "当前配置",
-    "log.segmentation": "切分模式",
-    "log.min_samples": "最小段样本",
-    "log.complex_llm": "复杂LLM",
-    "log.simple_llm": "简单LLM",
-    "log.dual_path": "双路推理",
-    "log.llm_report": "LLM报告",
-    "log.enabled": "开启",
-    "log.disabled": "关闭",
-    "cfg.section_sampling": "采样",
-    "cfg.section_llm": "LLM",
-    "cfg.section_corpus": "语料库",
-    "cfg.section_general": "通用",
-    "cfg.section_paths": "路径",
-    "cfg.section_interface": "界面",
-    "cfg.sampling_strategy": "采样策略",
-    "cfg.concurrency": "并发",
-    "cfg.report_llm": "报告LLM",
     "notify.empty_input": "请输入 BV 号 / AV 号 / URL",
+    "notify.cancel_done": "任务已中断",
+    "notify.cancel_none": "当前没有正在运行的任务",
     "notify.copy_empty": "没有选中的文本可复制",
-    "notify.copy_done": "输出已复制到剪贴板",
+    "notify.copy_done": "已复制到剪贴板",
     "notify.copy_failed": "复制失败",
     "notify.done": "分析完成",
     "notify.failed": "分析失败: {error}",
@@ -57,7 +41,7 @@ _STRINGS = {
     "settings.cancel": "取消",
     "settings.saved": "设置已保存（重启后仍生效）",
     "settings.tab_display": "显示",
-    "settings.tab_general": "通用",
+    "settings.tab_general": "凭证",
     "settings.tab_analysis": "分析",
     "settings.tab_llm": "LLM",
     "settings.section_corpus": "语料库比对",
@@ -66,6 +50,7 @@ _STRINGS = {
         "最小段样本数": "每段弹幕数量下限，不足的段自动并入相邻段。",
         "频次排序": "开启后按出现频次取 TOP_N 弹幕采样；关闭则取每段前 N 条。",
         "采样条数 TOP_N": "每段送入 LLM 分析的弹幕条数。",
+        "段内批量推理": "开启后同段采样弹幕合并为一次 LLM 请求（请求数 = 段数×3，降低请求频率）；批量输出条数不符时自动回退逐条重跑。关闭时逐条分析（请求数 = 段数×TOP_N×3）。",
         "置信水平": "共识率置信区间（Wilson 区间）的置信水平。",
         "LLM 分析报告": "开启后分析完成自动生成社会语言学分析报告并打包。",
         "LLM 并发上限": "LLM API 请求的最大并发数。",
@@ -89,18 +74,26 @@ _STRINGS = {
         "分析报告 LLM": "生成单视频与语料库比对分析报告，需独立配置。",
         "思考模式": "控制对应模型是否启用深度思考，三者独立；按钮蓝色背景表示已开启。",
         "报告生成温度": "分析报告生成的采样温度，越低越稳定。",
+        "请求超时": "单次 LLM 请求的等待上限（秒），超时判失败并触发重试；本地大模型建议 120 以上。",
         "Base URL / API Key / 模型": "均支持粘贴、复制；Key 额外支持显示/隐藏；Base URL 支持连接检测。",
     },
     "settings.help_general": {
-        "凭证状态": "当前生效的 B站凭证来源：登录凭证文件（DATA_ROOT/credential.json）优先，其次 .env 环境变量；无凭证时仅能获取少量弹幕。",
-        "SESSDATA / bili_jct / buvid3": "B站凭证核心字段，支持显示/隐藏、复制与粘贴；未登录时可点击“打开终端登录”按钮扫码获取。",
-        "打开终端登录": "在系统终端中执行 danmaku-analyzer login，扫码登录后凭证自动保存至 credential.json。",
+        "凭证状态": "当前生效的凭证，无凭证时仅能获取少量弹幕。",
+        "SESSDATA / bili_jct / buvid3": "B站凭证核心字段，支持直接输入、显示/隐藏、复制与粘贴；未登录时可点击“打开终端登录”按钮扫码获取。",
+        "登录 / 退出": "B站凭证来源",
     },
     "settings.credential_status": "凭证状态",
     "settings.credential_login": "已登录（credential.json）",
+    "settings.credential_login_user": "已登录（{uname} · UID {mid}）",
     "settings.credential_env": ".env 环境变量",
     "settings.credential_none": "无凭证（仅能获取少量弹幕）",
     "settings.open_terminal_login": "打开终端登录",
+    "settings.account_actions": "登录 / 退出",
+    "settings.logout": "退出登录",
+    "settings.logout_confirm": "确定退出登录吗？",
+    "settings.logout_done": "已退出登录：B站服务端会话已失效，凭证文件已删除",
+    "settings.logout_done_remote_failed": "已删除本地凭证，但B站服务端退出失败（该凭证在B站侧可能仍有效直至过期）",
+    "settings.logout_none": "当前无已保存的登录凭证",
     "settings.sessdata": "SESSDATA",
     "settings.bili_jct": "bili_jct",
     "settings.buvid3": "buvid3",
@@ -110,6 +103,7 @@ _STRINGS = {
     "settings.sampling_freq": "频次排序",
     "settings.sampling_head": "每段前 N 条",
     "settings.top_n": "采样条数 TOP_N",
+    "settings.batch_analysis": "段内批量推理",
     "settings.confidence_level": "置信水平",
     "settings.llm_report": "LLM 分析报告",
     "settings.llm_concurrency": "LLM 并发上限",
@@ -130,6 +124,7 @@ _STRINGS = {
     "settings.simple_section": "简单任务 LLM",
     "settings.report_section": "分析报告 LLM",
     "settings.report_temp": "报告生成温度",
+    "settings.timeout": "请求超时（秒）",
     "settings.base_url": "Base URL",
     "settings.api_key": "API Key",
     "settings.model_name": "模型名",
@@ -184,14 +179,14 @@ _STRINGS = {
     "settings.fixed": "固定等分",
     "settings.dynamic": "动态密度",
     "binding.analyze": "开始分析",
-    "binding.config": "查看配置",
     "binding.settings": "设置",
     "binding.paste": "粘贴",
     "binding.copy_selection": "复制选中",
     "binding.quit": "退出",
+    "mode.home": "主页",
     "mode.single": "个体分析",
     "mode.compare": "比对分析",
-    "mode.log": "日志",
+    "mode.log": "实时日志",
     "terminal.opened": "已打开系统终端，请在新窗口扫码登录",
     "terminal.open_failed": "打开系统终端失败，请手动在终端运行 danmaku-analyzer login",
     "compare.placeholder": "粘贴多个 BV / AV / 链接，一行一条（或用逗号、空格分隔）\nEnter 换行，Alt+Enter 开始比对",
@@ -209,25 +204,6 @@ _STRINGS = {
     "error.no_report": "分析未产生有效报告: {input}",
 }
 
-# 可持久化到 tui_prefs.json 的设置（本地用户数据，已 gitignore 不入版本库）
-PERSIST_SETTINGS_KEYS = (
-    "SEGMENTATION_MODE", "MIN_SEGMENT_SAMPLES", "ENABLE_FREQ_BASED_SAMPLING",
-    "TOP_N", "CONFIDENCE_LEVEL", "ENABLE_LLM_ANALYSIS_REPORT", "LLM_CONCURRENCY",
-    "ENABLE_LLM_TOKENIZER", "LLM_TOKENIZER_MIN_LENGTH",
-    "CONTEXT_TIME_WINDOW", "MAX_CONTEXT_TOKENS",
-    "CORPUS_MIN_VIDEOS_PER_PARTITION", "CORPUS_ZONE_POLICY",
-    "ENABLE_TEMPORAL_GROUPING", "TEMPORAL_GRANULARITY",
-    "ENABLE_CORPUS_STATISTICS",
-)
-PERSIST_LLM_KEYS = (
-    "ENABLE_DUAL_PATH", "JSD_THRESHOLD_LOW", "JSD_THRESHOLD_MEDIUM",
-    "SIMPLE_LLM_ENABLE_THINKING", "COMPLEX_LLM_ENABLE_THINKING",
-    "ANALYSIS_REPORT_LLM_ENABLE_THINKING", "ANALYSIS_REPORT_LLM_TEMPERATURE",
-    "SIMPLE_LLM_BASE_URL", "SIMPLE_LLM_API_KEY", "SIMPLE_LLM_MODEL",
-    "COMPLEX_LLM_BASE_URL", "COMPLEX_LLM_API_KEY", "COMPLEX_LLM_MODEL",
-    "ANALYSIS_REPORT_LLM_BASE_URL", "ANALYSIS_REPORT_LLM_API_KEY", "ANALYSIS_REPORT_LLM_MODEL",
-)
-
 
 class I18n:
     def t(self, key: str, **kwargs) -> str:
@@ -238,54 +214,6 @@ class I18n:
     def raw(self, key: str):
         """按键取原始值（用于快捷键映射等非字符串条目）"""
         return _STRINGS.get(key)
-
-
-def _prefs_path() -> str:
-    from ..config import get_settings
-
-    return get_settings().resolve_data_path("tui_prefs.json")
-
-
-def load_prefs() -> dict:
-    """读取 TUI 偏好（已持久化设置），文件缺失/损坏时返回空 dict"""
-    try:
-        path = _prefs_path()
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning(f"TUI 偏好读取失败，使用默认值: {e}")
-    return {}
-
-
-def save_prefs(updates: dict) -> None:
-    """合并写入 TUI 偏好（不覆盖已有键）"""
-    try:
-        prefs = load_prefs()
-        prefs.update(updates)
-        path = _prefs_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(prefs, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        logger.warning(f"TUI 偏好保存失败（仅本次会话生效）: {e}")
-
-
-def apply_saved_prefs() -> None:
-    """启动时将已持久化的设置应用到配置单例"""
-    from ..config import get_settings
-    from ..llm_config import get_llm_settings
-
-    prefs = load_prefs()
-    settings = get_settings()
-    llm_cfg = get_llm_settings()
-    for key in PERSIST_SETTINGS_KEYS:
-        if key in prefs:
-            setattr(settings, key, prefs[key])
-    for key in PERSIST_LLM_KEYS:
-        if key in prefs:
-            setattr(llm_cfg, key, prefs[key])
 
 
 i18n = I18n()

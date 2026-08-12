@@ -94,7 +94,10 @@ class TestPosNormalization:
         result = asyncio.run(analyzer._llm_tokenize("你好跑"))
         assert result == [("你好", "n"), ("跑", "v")]
         kwargs = analyzer.llm_client.chat.completions.captured_kwargs
-        assert kwargs["extra_body"] == {"enable_thinking": False}
+        assert kwargs["extra_body"] == {
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
 
 
 # ========== 问题1：extra_body 始终显式传递 ==========
@@ -108,7 +111,10 @@ class TestExtraBodyAlwaysSent:
         fake = _FakeAsyncClient(['{"emotion": {"label": "positive", "confidence": 0.9}}'])
         result = asyncio.run(client._call_llm(fake, "m", "sys", "user", 0.1))
         assert result["emotion"]["label"] == "positive"
-        assert fake.chat.completions.captured_kwargs["extra_body"] == {"enable_thinking": flag}
+        assert fake.chat.completions.captured_kwargs["extra_body"] == {
+            "enable_thinking": flag,
+            "chat_template_kwargs": {"enable_thinking": flag},
+        }
 
     @pytest.mark.parametrize("flag", [True, False])
     def test_report_generator_call_llm(self, flag):
@@ -118,7 +124,56 @@ class TestExtraBodyAlwaysSent:
         gen.client = fake
         content = asyncio.run(gen._call_llm("sys", "user"))
         assert content == "报告正文"
-        assert fake.chat.completions.captured_kwargs["extra_body"] == {"enable_thinking": flag}
+        assert fake.chat.completions.captured_kwargs["extra_body"] == {
+            "enable_thinking": flag,
+            "chat_template_kwargs": {"enable_thinking": flag},
+        }
+
+
+# ========== 请求超时接配置 ==========
+
+class TestLLMTimeoutConfig:
+
+    def test_llm_client_timeouts_follow_config(self, monkeypatch):
+        from danmaku_analyzer.llm_config import get_llm_settings
+        cfg = get_llm_settings()
+        monkeypatch.setattr(cfg, "COMPLEX_LLM_TIMEOUT", 77.0)
+        monkeypatch.setattr(cfg, "SIMPLE_LLM_TIMEOUT", 55.0)
+        client = LLMClient()
+        assert float(client.complex_client.timeout) == pytest.approx(77.0)
+        assert float(client.simple_client.timeout) == pytest.approx(55.0)
+
+    def test_report_generator_timeout_follows_config(self, monkeypatch):
+        from danmaku_analyzer.llm_config import get_llm_settings
+        cfg = get_llm_settings()
+        monkeypatch.setattr(cfg, "ANALYSIS_REPORT_LLM_TIMEOUT", 99.0)
+        gen = AnalysisReportGenerator()
+        assert float(gen.client.timeout) == pytest.approx(99.0)
+
+
+# ========== LLM 配置写回 .env（单一数据源） ==========
+
+class TestWriteLlmEnv:
+
+    def test_inplace_replace_preserves_comments_and_others(self, tmp_path):
+        from danmaku_analyzer.prefs import write_llm_env
+        env = tmp_path / ".env"
+        env.write_text(
+            "# 注释保留\nCOMPLEX_LLM_MODEL=old-model\nOTHER_KEY=keep\n",
+            encoding="utf-8",
+        )
+        write_llm_env({"COMPLEX_LLM_MODEL": "new-model"}, str(env))
+        lines = env.read_text(encoding="utf-8").splitlines()
+        assert lines == ["# 注释保留", "COMPLEX_LLM_MODEL=new-model", "OTHER_KEY=keep"]
+
+    def test_missing_keys_appended(self, tmp_path):
+        from danmaku_analyzer.prefs import write_llm_env
+        env = tmp_path / ".env"
+        env.write_text("COMPLEX_LLM_MODEL=m\n", encoding="utf-8")
+        write_llm_env({"COMPLEX_LLM_TIMEOUT": 120.0, "SIMPLE_LLM_TIMEOUT": 90.0}, str(env))
+        text = env.read_text(encoding="utf-8")
+        assert "COMPLEX_LLM_TIMEOUT=120.0" in text
+        assert "SIMPLE_LLM_TIMEOUT=90.0" in text
 
 
 # ========== 问题3+4：死参数移除 + tenacity 重试 ==========

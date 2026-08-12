@@ -263,13 +263,47 @@ async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOption
             llm_result=llm_result, segment_id=segment_idx,
         )
 
-    # 所有段的采样与 LLM 任务一次性提交，由 LLMClient 实例级信号量限速，避免段间串行空等
-    tasks = []
-    task_samples = []  # 与 tasks 一一对应：(样本弹幕, 所属段)
+    async def _analyze_segment_batch(sample_danmaku, segment, segment_danmaku, hard_metrics, segment_idx):
+        """段内批量：采样弹幕合并为一次请求；失败抛错由调用方回退逐条"""
+        items = []
+        for d in sample_danmaku:
+            context = context_provider.get_context(d, segment, segment_danmaku)
+            items.append((d.content, context.to_prompt_text()))
+        complex_prompt = prompt_builder.build_complex_prompt_batch(
+            social_vars.tname, social_vars.tags, items
+        )
+        simple_prompt = prompt_builder.build_simple_prompt_batch([d.content for d in sample_danmaku])
+        llm_results = await llm_client.analyze_batch(complex_prompt, simple_prompt, len(sample_danmaku))
+        return [
+            DanmakuRecord(
+                tname=social_vars.tname, zone_type=segment.zone_type,
+                tags=social_vars.tags, hard_metrics=hard_metrics,
+                llm_result=llm_result, segment_id=segment_idx,
+            )
+            for _, llm_result in zip(sample_danmaku, llm_results)
+        ]
+
+    async def _analyze_segment(sample_danmaku, segment, segment_danmaku, hard_metrics, segment_idx):
+        """批量模式入口：优先段内批量，批量失败（解析/条数不符/请求错误）回退逐条重跑"""
+        try:
+            return await _analyze_segment_batch(sample_danmaku, segment, segment_danmaku, hard_metrics, segment_idx)
+        except Exception as e:
+            logger.warning(f"段 {segment_idx} 批量推理失败，回退逐条模式: {e}")
+            results = await asyncio.gather(*[
+                _analyze_one(d, segment, segment_danmaku, hard_metrics, segment_idx)
+                for d in sample_danmaku
+            ], return_exceptions=True)
+            records = []
+            for result in results:
+                if isinstance(result, Exception):
+                    raise result
+                records.append(result)
+            return records
+
+    # 采样：频次去重 TOP_N 或每段前 N 条
+    segment_samples = []
     for i, segment in enumerate(segments):
         segment_danmaku = segment_danmaku_lists[i]
-        hard_metrics = hard_metrics_list[i]
-
         if options.use_freq_based:
             content_counter = Counter(d.content for d in segment_danmaku)
             top_contents = content_counter.most_common(options.use_top_n)
@@ -280,24 +314,43 @@ async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOption
             sample_danmaku = [content_to_danmaku[content] for content, _ in top_contents]
         else:
             sample_danmaku = segment_danmaku[:options.use_top_n]
+        segment_samples.append(sample_danmaku)
 
-        for d in sample_danmaku:
-            tasks.append(_analyze_one(d, segment, segment_danmaku, hard_metrics, i))
-            task_samples.append((d, segment))
+    # 所有段的采样与 LLM 任务一次性提交，由 LLMClient 实例级信号量限速，避免段间串行空等
+    tasks = []
+    task_samples = []  # 与 tasks 一一对应：(样本弹幕列表, 所属段)，批量模式下列表含整段样本
+    batch_mode = settings.ENABLE_BATCH_SEGMENT_ANALYSIS
+    for i, segment in enumerate(segments):
+        sample_danmaku = segment_samples[i]
+        hard_metrics = hard_metrics_list[i]
+        if batch_mode and sample_danmaku:
+            tasks.append(_analyze_segment(
+                sample_danmaku, segment, segment_danmaku_lists[i], hard_metrics, i
+            ))
+            task_samples.append((sample_danmaku, segment))
+        else:
+            for d in sample_danmaku:
+                tasks.append(_analyze_one(d, segment, segment_danmaku_lists[i], hard_metrics, i))
+                task_samples.append(([d], segment))
 
-    progress("弹幕分析", f"已提交 {len(tasks)} 条 LLM 分析任务（并发上限 {settings.LLM_CONCURRENCY}）")
+    request_unit = "段" if batch_mode else "条"
+    progress("弹幕分析", f"已提交 {len(tasks)} 个 LLM 分析任务（按{request_unit}计，并发上限 {settings.LLM_CONCURRENCY}）")
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # 同步过滤：仅登记成功结果对应的样本，保证 records 与样本一一对应（防止 kappa_ready 错位）
     output = SegmentAnalysisOutput()
     fail_count = 0
-    for result, (d, segment) in zip(results, task_samples):
+    for result, (sample_list, segment) in zip(results, task_samples):
         if isinstance(result, Exception):
-            fail_count += 1
+            fail_count += len(sample_list)
             logger.error(f"LLM 分析失败: {result}")
+        elif isinstance(result, list):
+            output.records.extend(result)
+            output.sample_danmaku.extend(sample_list)
+            output.sample_segments.extend([segment] * len(sample_list))
         else:
             output.records.append(result)
-            output.sample_danmaku.append(d)
+            output.sample_danmaku.append(sample_list[0])
             output.sample_segments.append(segment)
 
     if fail_count:
@@ -410,6 +463,7 @@ async def _stage_report(
         "view_count": crawl.meta.view_count,
         "danmaku_count": len(crawl.danmaku_list),
         "pipeline_version": __version__,
+        "batch_segment_analysis": options.settings.ENABLE_BATCH_SEGMENT_ANALYSIS,
     }
     reports = reporter.generate_reports(
         aggregated, kappa_records=_build_kappa_records(analysis), metadata=video_metadata

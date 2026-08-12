@@ -19,13 +19,14 @@ from textual.widgets.option_list import Option
 
 from ...config import get_settings
 from ...llm_config import get_llm_settings
-from ..i18n import (
-    PERSIST_LLM_KEYS,
+from ...prefs import (
+    ENV_LLM_KEYS,
     PERSIST_SETTINGS_KEYS,
-    i18n,
     load_prefs,
     save_prefs,
+    write_llm_env,
 )
+from ..i18n import i18n
 
 _THEME_IDS = [
     "textual-dark",
@@ -53,6 +54,7 @@ _ANALYSIS_DEFAULTS = {
     "SEGMENTATION_MODE": "dynamic",
     "MIN_SEGMENT_SAMPLES": 30,
     "ENABLE_FREQ_BASED_SAMPLING": False,
+    "ENABLE_BATCH_SEGMENT_ANALYSIS": False,
     "TOP_N": 10,
     "CONFIDENCE_LEVEL": 0.95,
     "ENABLE_LLM_ANALYSIS_REPORT": True,
@@ -72,6 +74,9 @@ _LLM_DEFAULTS = {
     "COMPLEX_LLM_ENABLE_THINKING": False,
     "ANALYSIS_REPORT_LLM_ENABLE_THINKING": False,
     "ANALYSIS_REPORT_LLM_TEMPERATURE": 0.3,
+    "COMPLEX_LLM_TIMEOUT": 120.0,
+    "SIMPLE_LLM_TIMEOUT": 120.0,
+    "ANALYSIS_REPORT_LLM_TIMEOUT": 180.0,
 }
 
 # 语料库参数默认值（与 config.py 保持一致）
@@ -84,6 +89,9 @@ _CORPUS_DEFAULTS = {
 }
 
 # 分析报告 LLM 未配置时界面直接展示配置现值（占位默认值），不再预填复杂任务值
+
+# sessdata → (uname, mid) 会话内缓存，避免每次打开设置页都请求 nav 接口
+_ACCOUNT_CACHE: dict[str, tuple[str, str]] = {}
 
 
 class SettingsScreen(ModalScreen[bool]):
@@ -154,6 +162,10 @@ class SettingsScreen(ModalScreen[bool]):
         margin-left: 1;
     }
 
+    #btn-logout {
+        margin-left: 1;
+    }
+
     .section-label {
         width: 100%;
         padding: 1 0 0 0;
@@ -173,8 +185,8 @@ class SettingsScreen(ModalScreen[bool]):
         margin: 0 0 1 0;
     }
 
-    .status-value {
-        width: auto;
+    #credential-status-label {
+        width: 1fr;
         padding: 1 0;
     }
 
@@ -242,28 +254,29 @@ class SettingsScreen(ModalScreen[bool]):
                 with TabPane(i18n.t("settings.tab_general"), id="tab-general"):
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.credential_status"))
-                        yield Label(self._credential_status_text(), id="credential-status-label", classes="status-value")
+                        yield Label(self._credential_status_text(), id="credential-status-label")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.sessdata"))
-                        yield Input(cred.get("sessdata", ""), password=True, disabled=True, id="inp-cred-sessdata")
+                        yield Input(cred.get("sessdata", ""), password=True, id="inp-cred-sessdata")
                         yield Button(i18n.t("settings.key_show"), id="btn-show-cred-sessdata", classes="key-btn")
                         yield Button(i18n.t("settings.key_copy"), id="btn-copy-cred-sessdata", classes="key-btn")
                         yield Button(i18n.t("settings.key_paste"), id="btn-paste-cred-sessdata", classes="key-btn")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.bili_jct"))
-                        yield Input(cred.get("bili_jct", ""), password=True, disabled=True, id="inp-cred-jct")
+                        yield Input(cred.get("bili_jct", ""), password=True, id="inp-cred-jct")
                         yield Button(i18n.t("settings.key_show"), id="btn-show-cred-jct", classes="key-btn")
                         yield Button(i18n.t("settings.key_copy"), id="btn-copy-cred-jct", classes="key-btn")
                         yield Button(i18n.t("settings.key_paste"), id="btn-paste-cred-jct", classes="key-btn")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.buvid3"))
-                        yield Input(cred.get("buvid3", ""), password=True, disabled=True, id="inp-cred-buvid3")
+                        yield Input(cred.get("buvid3", ""), password=True, id="inp-cred-buvid3")
                         yield Button(i18n.t("settings.key_show"), id="btn-show-cred-buvid3", classes="key-btn")
                         yield Button(i18n.t("settings.key_copy"), id="btn-copy-cred-buvid3", classes="key-btn")
                         yield Button(i18n.t("settings.key_paste"), id="btn-paste-cred-buvid3", classes="key-btn")
                     with Static(classes="setting-row"):
-                        yield Label(i18n.t("settings.open_terminal_login"))
+                        yield Label(i18n.t("settings.account_actions"))
                         yield Button(i18n.t("settings.open_terminal_login"), id="btn-open-terminal-login")
+                        yield Button(i18n.t("settings.logout"), variant="error", id="btn-logout")
                 with TabPane(i18n.t("settings.tab_analysis"), id="tab-analysis"):
                     with Static(classes="setting-row setting-row-tall"):
                         yield Label(i18n.t("settings.seg_mode"))
@@ -281,6 +294,9 @@ class SettingsScreen(ModalScreen[bool]):
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.top_n"))
                         yield Input(str(settings.TOP_N), type="integer", id="inp-top-n")
+                    with Static(classes="setting-row"):
+                        yield Label(i18n.t("settings.batch_analysis"))
+                        yield Switch(settings.ENABLE_BATCH_SEGMENT_ANALYSIS, id="sw-batch-analysis")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.confidence_level"))
                         yield Input(str(settings.CONFIDENCE_LEVEL), type="number", id="inp-confidence-level")
@@ -363,6 +379,9 @@ class SettingsScreen(ModalScreen[bool]):
                         )
                         yield Button(i18n.t("settings.key_copy"), id="btn-copy-simple-model", classes="key-btn")
                         yield Button(i18n.t("settings.key_paste"), id="btn-paste-simple-model", classes="key-btn")
+                    with Static(classes="setting-row"):
+                        yield Label(i18n.t("settings.timeout"))
+                        yield Input(str(llm_cfg.SIMPLE_LLM_TIMEOUT), type="number", id="inp-simple-timeout")
                     yield Label(i18n.t("settings.complex_section"), classes="section-label")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.base_url"))
@@ -385,6 +404,9 @@ class SettingsScreen(ModalScreen[bool]):
                         )
                         yield Button(i18n.t("settings.key_copy"), id="btn-copy-complex-model", classes="key-btn")
                         yield Button(i18n.t("settings.key_paste"), id="btn-paste-complex-model", classes="key-btn")
+                    with Static(classes="setting-row"):
+                        yield Label(i18n.t("settings.timeout"))
+                        yield Input(str(llm_cfg.COMPLEX_LLM_TIMEOUT), type="number", id="inp-complex-timeout")
                     yield Label(i18n.t("settings.report_section"), classes="section-label")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.base_url"))
@@ -410,6 +432,9 @@ class SettingsScreen(ModalScreen[bool]):
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.report_temp"))
                         yield Input(str(llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE), type="number", id="inp-report-temp")
+                    with Static(classes="setting-row"):
+                        yield Label(i18n.t("settings.timeout"))
+                        yield Input(str(llm_cfg.ANALYSIS_REPORT_LLM_TIMEOUT), type="number", id="inp-report-timeout")
                 with TabPane(i18n.t("settings.tab_about"), id="tab-about"):
                     yield Label(i18n.t("settings.about_desc"), id="about-desc")
                     yield Label(i18n.t("settings.tab_analysis"), classes="section-label")
@@ -432,6 +457,7 @@ class SettingsScreen(ModalScreen[bool]):
 
     def on_mount(self) -> None:
         self._constrain_tab_panes()
+        self._disable_decorative_focus()
         settings = get_settings()
         self._select_current_theme()
         self._highlight_option("#seg-mode-options", settings.SEGMENTATION_MODE)
@@ -441,12 +467,20 @@ class SettingsScreen(ModalScreen[bool]):
         self._fill_help_tables()
         self._fill_about_info()
         self._sync_reset_button()
+        self.run_worker(self._refresh_credential_account(), exclusive=False)
 
     def _constrain_tab_panes(self) -> None:
         """TabPane 默认 height:auto 会撑破小窗口，强制限高并启用滚动"""
         for pane in self.query(TabPane):
             pane.styles.height = "1fr"
             pane.styles.overflow_y = "auto"
+
+    def _disable_decorative_focus(self) -> None:
+        """按钮与只读表格不可聚焦，消除点击后默认焦点样式的白底；输入控件不受影响"""
+        for widget in self.query(Button):
+            widget.can_focus = False
+        for widget in self.query(DataTable):
+            widget.can_focus = False
 
     def _highlight_option(self, selector: str, option_id: str) -> None:
         """将 OptionList 高亮定位到指定 id 的选项，未命中时保持首位"""
@@ -513,6 +547,30 @@ class SettingsScreen(ModalScreen[bool]):
             return i18n.t("settings.credential_env")
         return i18n.t("settings.credential_none")
 
+    async def _refresh_credential_account(self, sessdata: str = "") -> None:
+        """异步拉取登录用户名与 UID，替换凭证状态括号内的来源说明；失败时保持原文案"""
+        from ...account import fetch_account_info, resolve_credential
+
+        if not sessdata:
+            credential, _ = resolve_credential()
+            sessdata = (credential.sessdata if credential else "") or ""
+        if not sessdata:
+            return
+        account = _ACCOUNT_CACHE.get(sessdata)
+        if account is None:
+            try:
+                info = await fetch_account_info(sessdata)
+            except Exception:
+                return
+            if not info.get("is_login"):
+                return
+            account = (info["uname"], info["mid"])
+            _ACCOUNT_CACHE[sessdata] = account
+        if account[0]:
+            self.query_one("#credential-status-label", Label).update(
+                i18n.t("settings.credential_login_user", uname=account[0], mid=account[1])
+            )
+
     def _fill_about_info(self) -> None:
         from ... import __version__
 
@@ -548,6 +606,8 @@ class SettingsScreen(ModalScreen[bool]):
             self._open_url("https://github.com/SanKaGenKeShi")
         elif button_id == "btn-open-terminal-login":
             self.app._open_system_terminal()
+        elif button_id == "btn-logout":
+            self.app.push_screen(_LogoutConfirmScreen(), self._on_logout_confirmed)
 
     def _reset_current_tab(self) -> None:
         """根据当前激活标签页执行对应的恢复默认逻辑（仅可设置页）"""
@@ -668,6 +728,7 @@ class SettingsScreen(ModalScreen[bool]):
         self._highlight_option("#seg-mode-options", _ANALYSIS_DEFAULTS["SEGMENTATION_MODE"])
         self.query_one("#inp-min-samples", Input).value = str(_ANALYSIS_DEFAULTS["MIN_SEGMENT_SAMPLES"])
         self.query_one("#sw-freq-sampling", Switch).value = _ANALYSIS_DEFAULTS["ENABLE_FREQ_BASED_SAMPLING"]
+        self.query_one("#sw-batch-analysis", Switch).value = _ANALYSIS_DEFAULTS["ENABLE_BATCH_SEGMENT_ANALYSIS"]
         self.query_one("#inp-top-n", Input).value = str(_ANALYSIS_DEFAULTS["TOP_N"])
         self.query_one("#inp-confidence-level", Input).value = str(_ANALYSIS_DEFAULTS["CONFIDENCE_LEVEL"])
         self.query_one("#sw-llm-report", Switch).value = _ANALYSIS_DEFAULTS["ENABLE_LLM_ANALYSIS_REPORT"]
@@ -701,6 +762,9 @@ class SettingsScreen(ModalScreen[bool]):
             self._thinking[prefix] = _LLM_DEFAULTS[key]
             self._apply_thinking_button(prefix)
         self.query_one("#inp-report-temp", Input).value = str(_LLM_DEFAULTS["ANALYSIS_REPORT_LLM_TEMPERATURE"])
+        self.query_one("#inp-simple-timeout", Input).value = str(_LLM_DEFAULTS["SIMPLE_LLM_TIMEOUT"])
+        self.query_one("#inp-complex-timeout", Input).value = str(_LLM_DEFAULTS["COMPLEX_LLM_TIMEOUT"])
+        self.query_one("#inp-report-timeout", Input).value = str(_LLM_DEFAULTS["ANALYSIS_REPORT_LLM_TIMEOUT"])
         self.notify(i18n.t("settings.reset_done"), severity="information")
 
     def _save(self) -> None:
@@ -718,6 +782,7 @@ class SettingsScreen(ModalScreen[bool]):
             settings.SEGMENTATION_MODE = str(seg_mode.id)
         settings.MIN_SEGMENT_SAMPLES = self._int_value("#inp-min-samples", settings.MIN_SEGMENT_SAMPLES)
         settings.ENABLE_FREQ_BASED_SAMPLING = self.query_one("#sw-freq-sampling", Switch).value
+        settings.ENABLE_BATCH_SEGMENT_ANALYSIS = self.query_one("#sw-batch-analysis", Switch).value
         settings.TOP_N = self._int_value("#inp-top-n", settings.TOP_N)
         settings.CONFIDENCE_LEVEL = self._float_value("#inp-confidence-level", settings.CONFIDENCE_LEVEL)
         settings.ENABLE_LLM_ANALYSIS_REPORT = self.query_one("#sw-llm-report", Switch).value
@@ -734,16 +799,19 @@ class SettingsScreen(ModalScreen[bool]):
         llm_cfg.JSD_THRESHOLD_LOW = self._float_value("#inp-jsd-low", llm_cfg.JSD_THRESHOLD_LOW)
         llm_cfg.JSD_THRESHOLD_MEDIUM = self._float_value("#inp-jsd-medium", llm_cfg.JSD_THRESHOLD_MEDIUM)
 
-        llm_cfg.COMPLEX_LLM_BASE_URL = self._text_value("#inp-complex-url", llm_cfg.COMPLEX_LLM_BASE_URL)
-        llm_cfg.COMPLEX_LLM_API_KEY = self._text_value("#inp-complex-key", llm_cfg.COMPLEX_LLM_API_KEY)
-        llm_cfg.COMPLEX_LLM_MODEL = self._text_value("#inp-complex-model", llm_cfg.COMPLEX_LLM_MODEL)
-        llm_cfg.SIMPLE_LLM_BASE_URL = self._text_value("#inp-simple-url", llm_cfg.SIMPLE_LLM_BASE_URL)
-        llm_cfg.SIMPLE_LLM_API_KEY = self._text_value("#inp-simple-key", llm_cfg.SIMPLE_LLM_API_KEY)
-        llm_cfg.SIMPLE_LLM_MODEL = self._text_value("#inp-simple-model", llm_cfg.SIMPLE_LLM_MODEL)
-        llm_cfg.ANALYSIS_REPORT_LLM_BASE_URL = self._text_value("#inp-report-url", llm_cfg.ANALYSIS_REPORT_LLM_BASE_URL)
-        llm_cfg.ANALYSIS_REPORT_LLM_API_KEY = self._text_value("#inp-report-key", llm_cfg.ANALYSIS_REPORT_LLM_API_KEY)
-        llm_cfg.ANALYSIS_REPORT_LLM_MODEL = self._text_value("#inp-report-model", llm_cfg.ANALYSIS_REPORT_LLM_MODEL)
+        llm_cfg.COMPLEX_LLM_BASE_URL = self._text_value("#inp-complex-url")
+        llm_cfg.COMPLEX_LLM_API_KEY = self._text_value("#inp-complex-key")
+        llm_cfg.COMPLEX_LLM_MODEL = self._text_value("#inp-complex-model")
+        llm_cfg.SIMPLE_LLM_BASE_URL = self._text_value("#inp-simple-url")
+        llm_cfg.SIMPLE_LLM_API_KEY = self._text_value("#inp-simple-key")
+        llm_cfg.SIMPLE_LLM_MODEL = self._text_value("#inp-simple-model")
+        llm_cfg.ANALYSIS_REPORT_LLM_BASE_URL = self._text_value("#inp-report-url")
+        llm_cfg.ANALYSIS_REPORT_LLM_API_KEY = self._text_value("#inp-report-key")
+        llm_cfg.ANALYSIS_REPORT_LLM_MODEL = self._text_value("#inp-report-model")
         llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE = self._float_value("#inp-report-temp", llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE)
+        llm_cfg.SIMPLE_LLM_TIMEOUT = self._float_value("#inp-simple-timeout", llm_cfg.SIMPLE_LLM_TIMEOUT)
+        llm_cfg.COMPLEX_LLM_TIMEOUT = self._float_value("#inp-complex-timeout", llm_cfg.COMPLEX_LLM_TIMEOUT)
+        llm_cfg.ANALYSIS_REPORT_LLM_TIMEOUT = self._float_value("#inp-report-timeout", llm_cfg.ANALYSIS_REPORT_LLM_TIMEOUT)
 
         settings.CORPUS_MIN_VIDEOS_PER_PARTITION = self._int_value("#inp-corpus-min-videos", settings.CORPUS_MIN_VIDEOS_PER_PARTITION)
         zone_options = self.query_one("#zone-policy-options", OptionList)
@@ -757,12 +825,56 @@ class SettingsScreen(ModalScreen[bool]):
         if granularity:
             settings.TEMPORAL_GRANULARITY = str(granularity.id)
 
+        self._save_credentials()
+
         prefs = {key: getattr(settings, key) for key in PERSIST_SETTINGS_KEYS}
-        prefs.update({key: getattr(llm_cfg, key) for key in PERSIST_LLM_KEYS})
         prefs["compare_reuse"] = self.query_one("#sw-compare-reuse", Switch).value
         save_prefs(prefs)
+        # LLM 配置写回 .env（.env 为 LLM 配置唯一数据源，CLI/TUI 启动时直接加载）
+        write_llm_env({key: getattr(llm_cfg, key) for key in ENV_LLM_KEYS})
 
         self.notify(i18n.t("settings.saved"), severity="information")
+
+    def _save_credentials(self) -> None:
+        """手动填写的凭证写入登录凭证文件（credential.json，解析优先级高于 .env）"""
+        from ...account import save_credential
+
+        sessdata = self.query_one("#inp-cred-sessdata", Input).value.strip()
+        bili_jct = self.query_one("#inp-cred-jct", Input).value.strip()
+        buvid3 = self.query_one("#inp-cred-buvid3", Input).value.strip()
+        if not sessdata:
+            return
+        current = self._current_credential()
+        if (sessdata, bili_jct, buvid3) == (current["sessdata"], current["bili_jct"], current["buvid3"]):
+            return
+        save_credential({"sessdata": sessdata, "bili_jct": bili_jct, "buvid3": buvid3})
+        self.query_one("#credential-status-label", Label).update(i18n.t("settings.credential_login"))
+        self.run_worker(self._refresh_credential_account(sessdata), exclusive=False)
+
+    def _on_logout_confirmed(self, confirmed: bool) -> None:
+        if not confirmed:
+            return
+        self.run_worker(self._logout_async(), exclusive=False)
+
+    async def _logout_async(self) -> None:
+        """先通知B站服务端失效会话，再删除本地凭证；服务端失败不阻断本地删除"""
+        from ...account import load_credential, logout, remote_logout
+
+        credential = load_credential()
+        if not credential:
+            self.notify(i18n.t("settings.logout_none"), severity="warning")
+            return
+        try:
+            remote_ok = await remote_logout(credential)
+        except Exception:
+            remote_ok = False
+        logout()
+        _ACCOUNT_CACHE.clear()
+        for field_id in ("#inp-cred-sessdata", "#inp-cred-jct", "#inp-cred-buvid3"):
+            self.query_one(field_id, Input).value = ""
+        self.query_one("#credential-status-label", Label).update(self._credential_status_text())
+        key = "settings.logout_done" if remote_ok else "settings.logout_done_remote_failed"
+        self.notify(i18n.t(key), severity="information")
 
     def _int_value(self, selector: str, fallback: int) -> int:
         try:
@@ -776,9 +888,57 @@ class SettingsScreen(ModalScreen[bool]):
         except (ValueError, TypeError):
             return fallback
 
-    def _text_value(self, selector: str, fallback: str) -> str:
-        value = self.query_one(selector, Input).value.strip()
-        return value if value else fallback
+    def _text_value(self, selector: str) -> str:
+        """清空输入框属合法操作（如移除 API Key），直接返回输入值不做旧值回填"""
+        return self.query_one(selector, Input).value.strip()
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class _LogoutConfirmScreen(ModalScreen[bool]):
+    """退出登录确认对话框（删除 credential.json 不可逆，需显式确认）"""
+
+    DEFAULT_CSS = """
+    _LogoutConfirmScreen {
+        align: center middle;
+    }
+
+    #logout-confirm-dialog {
+        width: 74;
+        height: auto;
+        border: thick $error;
+        background: $background;
+        padding: 1 2;
+    }
+
+    #logout-confirm-dialog Label {
+        width: 100%;
+        height: auto;
+    }
+
+    #logout-confirm-buttons {
+        height: 3;
+        layout: horizontal;
+        align: right middle;
+        margin-top: 1;
+    }
+
+    #logout-confirm-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="logout-confirm-dialog"):
+            yield Label(i18n.t("settings.logout_confirm"))
+            with Horizontal(id="logout-confirm-buttons"):
+                yield Button(i18n.t("settings.logout"), variant="error", id="btn-confirm-logout")
+                yield Button(i18n.t("settings.cancel"), id="btn-cancel-logout")
+
+    def on_mount(self) -> None:
+        for widget in self.query(Button):
+            widget.can_focus = False
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "btn-confirm-logout")

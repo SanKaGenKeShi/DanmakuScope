@@ -6,7 +6,7 @@ LLM 客户端模块 - 双路推理 + 四维输出（含正字法状态）
 
 import json
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 import regex
 from openai import AsyncOpenAI
@@ -34,11 +34,11 @@ class LLMClient:
         llm_cfg = get_llm_settings()
         
         self.semaphore = asyncio.Semaphore(get_settings().LLM_CONCURRENCY)
-        self.complex_client = complex_async_client()
+        self.complex_client = complex_async_client(timeout=llm_cfg.COMPLEX_LLM_TIMEOUT)
         self.complex_model = llm_cfg.COMPLEX_LLM_MODEL
         self.complex_temperatures = llm_cfg.COMPLEX_LLM_TEMPERATURES
         
-        self.simple_client = simple_async_client()
+        self.simple_client = simple_async_client(timeout=llm_cfg.SIMPLE_LLM_TIMEOUT)
         self.simple_model = llm_cfg.SIMPLE_LLM_MODEL
         self.simple_temperature = llm_cfg.SIMPLE_LLM_TEMPERATURE
         
@@ -92,7 +92,11 @@ class LLMClient:
                 ],
                 temperature=temperature,
                 response_format={"type": "json_object"},
-                extra_body={"enable_thinking": thinking},
+                # chat_template_kwargs 为 llama.cpp 系后端关闭思考的必需参数，其他后端忽略
+                extra_body={
+                    "enable_thinking": thinking,
+                    "chat_template_kwargs": {"enable_thinking": thinking},
+                },
             )
             
             content = response.choices[0].message.content
@@ -225,3 +229,77 @@ class LLMClient:
         complex_result.output.sentence_function = sentence_function
         
         return complex_result
+
+    @staticmethod
+    def _extract_batch_items(result: Dict[str, Any], expected_count: int) -> List[Dict]:
+        """批量输出校验：items 存在且条数与输入一致，否则抛错触发逐条回退"""
+        items = result.get("items")
+        if not isinstance(items, list) or len(items) != expected_count:
+            got = len(items) if isinstance(items, list) else 0
+            raise ValueError(f"批量输出条数不符: 期望 {expected_count}，实际 {got}")
+        return items
+
+    async def analyze_batch(
+        self,
+        complex_prompt: PromptComponents,
+        simple_prompt: PromptComponents,
+        expected_count: int,
+    ) -> List[DualPathResult]:
+        """段内批量推理：双路各对整个批次推理一次，逐条比对两路结果算 JSD 共识；
+        简单路单次批量请求；任一路条数不符/失败即抛错，由调用方回退逐条模式"""
+        temperatures = self.complex_temperatures if self.enable_dual_path else self.complex_temperatures[:1]
+        logger.info(
+            f"开始批量分析（{expected_count} 条/批，{'双路' if self.enable_dual_path else '单路'}推理），"
+            f"模型: {self.complex_model}"
+        )
+
+        async def call_with_temp(temp):
+            return await self._call_llm(
+                self.complex_client,
+                self.complex_model,
+                complex_prompt.system_prompt,
+                complex_prompt.user_prompt,
+                temp,
+                self.enable_thinking,
+            )
+
+        complex_task = asyncio.gather(*[call_with_temp(t) for t in temperatures])
+        simple_task = self._call_llm(
+            self.simple_client,
+            self.simple_model,
+            simple_prompt.system_prompt,
+            simple_prompt.user_prompt,
+            self.simple_temperature,
+            self.simple_enable_thinking,
+        )
+        path_results, simple_result = await asyncio.gather(complex_task, simple_task)
+
+        path_items = [self._extract_batch_items(r, expected_count) for r in path_results]
+        simple_items = self._extract_batch_items(simple_result, expected_count)
+
+        results = []
+        for i in range(expected_count):
+            outputs = [path_items[p][i] for p in range(len(path_items))]
+            if len(outputs) == 1:
+                merged_output = merge_outputs(outputs, ConsensusLevel.HIGH)
+                consensus_level = ConsensusLevel.HIGH
+                jsd_score = 0.0
+            else:
+                jsd_score = calculate_jsd(outputs)
+                consensus_level = determine_consensus_level(
+                    jsd_score, self.jsd_threshold_low, self.jsd_threshold_medium
+                )
+                merged_output = merge_outputs(outputs, consensus_level)
+            weight_multiplier = calculate_weight_multiplier(consensus_level, self.low_consensus_weight)
+            sf_data = (simple_items[i] or {}).get("sentence_function", {})
+            merged_output.sentence_function = SentenceFunctionOutput.model_validate(sf_data)
+            results.append(DualPathResult(
+                output=merged_output,
+                consensus_level=consensus_level,
+                jsd_score=jsd_score,
+                weight_multiplier=weight_multiplier,
+                raw_outputs=outputs,
+                prompt_version=complex_prompt.prompt_version,
+            ))
+        logger.info(f"批量分析完成，共 {expected_count} 条")
+        return results

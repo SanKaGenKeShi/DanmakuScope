@@ -13,6 +13,7 @@ from rich.table import Table
 
 from .config import get_settings
 from .llm_config import get_llm_settings
+from .prefs import apply_saved_prefs
 from .utils.logger import get_logger, setup_logger
 from . import __version__
 
@@ -29,6 +30,7 @@ def cli(debug: bool, log_level: str):
         log_level = 'DEBUG'
     
     setup_logger(level=log_level)
+    apply_saved_prefs()
     
     if debug:
         console.print("[yellow]调试模式已启用[/yellow]")
@@ -402,6 +404,29 @@ def account():
 
 
 @cli.command()
+def logout():
+    """退出B站登录：通知B站服务端失效会话并删除本地凭证文件（credential.json）"""
+    from .account import load_credential, logout as account_logout, remote_logout
+
+    credential = load_credential()
+    if not credential:
+        console.print("[yellow]当前无已保存的登录凭证，无需退出[/yellow]")
+        return
+
+    try:
+        remote_ok = asyncio.run(remote_logout(credential))
+    except Exception as e:
+        remote_ok = False
+        logger.warning(f"B站服务端退出失败，仅删除本地凭证: {e}")
+
+    account_logout()
+    if remote_ok:
+        console.print("[bold green]已退出登录：B站服务端会话已失效，本地凭证文件已删除[/bold green]")
+    else:
+        console.print("[yellow]B站服务端退出失败，已删除本地凭证（该凭证在B站侧可能仍有效直至过期）[/yellow]")
+
+
+@cli.command()
 def version():
     """显示版本信息"""
     console.print(f"[bold]DanmakuScope[/bold] v{__version__}")
@@ -424,17 +449,21 @@ def config():
     table.add_row("切分模式", settings.SEGMENTATION_MODE)
     table.add_row("最小段样本", str(settings.MIN_SEGMENT_SAMPLES))
     table.add_row("弹幕采样策略", "频次排序" if settings.ENABLE_FREQ_BASED_SAMPLING else "每段前N条")
+    table.add_row("段内批量推理", "开启" if settings.ENABLE_BATCH_SEGMENT_ANALYSIS else "关闭")
     table.add_row("TOP_N", str(settings.TOP_N))
     table.add_row("复杂LLM模型", llm_cfg.COMPLEX_LLM_MODEL)
     table.add_row("简单LLM模型", llm_cfg.SIMPLE_LLM_MODEL)
     table.add_row("双路推理", "开启" if llm_cfg.ENABLE_DUAL_PATH else "关闭")
     table.add_row("JSD低阈值", str(llm_cfg.JSD_THRESHOLD_LOW))
     table.add_row("JSD中阈值", str(llm_cfg.JSD_THRESHOLD_MEDIUM))
+    table.add_row("复杂LLM超时", f"{llm_cfg.COMPLEX_LLM_TIMEOUT}s")
+    table.add_row("简单LLM超时", f"{llm_cfg.SIMPLE_LLM_TIMEOUT}s")
     table.add_row("微语境窗口", f"{settings.CONTEXT_TIME_WINDOW}s")
     table.add_row("最大Context Tokens", str(settings.MAX_CONTEXT_TOKENS))
     table.add_row("LLM分析报告", "开启" if settings.ENABLE_LLM_ANALYSIS_REPORT else "关闭")
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
         table.add_row("分析报告模型", llm_cfg.ANALYSIS_REPORT_LLM_MODEL)
+        table.add_row("报告LLM超时", f"{llm_cfg.ANALYSIS_REPORT_LLM_TIMEOUT}s")
     table.add_row("语料库级推断统计", "开启" if settings.ENABLE_CORPUS_STATISTICS else "关闭")
     table.add_row("每分区最少视频数", str(settings.CORPUS_MIN_VIDEOS_PER_PARTITION))
     table.add_row("冷热区策略", settings.CORPUS_ZONE_POLICY)

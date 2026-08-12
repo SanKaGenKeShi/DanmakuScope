@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     CONFIDENCE_LEVEL: float = Field(default=0.95, description="置信水平")
 
     ENABLE_FREQ_BASED_SAMPLING: bool = Field(default=False, description="是否按频次排序采样，默认False使用每段前N条")
+    ENABLE_BATCH_SEGMENT_ANALYSIS: bool = Field(default=False, description="段内批量推理：同段采样弹幕合并为一次 LLM 请求，请求数由段数决定（段数×3），降低请求频率")
     TOP_N: int = Field(default=10, description="频次排序采样时取前N条弹幕")
 
     ENABLE_SIGNIFICANCE_TESTING: bool = Field(default=False, description="是否启用单视频段间显著性检验，默认关闭，仅探索")

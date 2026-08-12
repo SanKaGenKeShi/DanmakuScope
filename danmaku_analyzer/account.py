@@ -23,6 +23,7 @@ QR_GENERATE_API = "https://passport.bilibili.com/x/passport-login/web/qrcode/gen
 QR_POLL_API = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
 LOGIN_INFO_API = "https://api.bilibili.com/x/web-interface/nav"
 BUVID_SPI_API = "https://api.bilibili.com/x/frontend/finger/spi"
+LOGOUT_API = "https://passport.bilibili.com/login/exit/v2"
 
 QR_POLL_INTERVAL = 2.0
 QR_LOGIN_TIMEOUT = 180.0
@@ -196,6 +197,45 @@ def save_credential(credential: dict, path: Optional[str] = None) -> str:
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(credential, f, ensure_ascii=False, indent=2)
     return path
+
+
+def logout(path: Optional[str] = None) -> bool:
+    """删除已保存的登录凭证文件，返回是否确实删除了文件（`.env` 凭证不受影响）"""
+    path = path or default_credential_path()
+    if not os.path.exists(path):
+        return False
+    os.remove(path)
+    logger.info(f"已退出登录，凭证文件删除: {path}")
+    return True
+
+
+async def remote_logout(credential: dict) -> bool:
+    """调用B站 passport 退出接口使服务端会话失效；凭证不完整或会话已失效时视为已退出"""
+    sessdata = credential.get("sessdata") or ""
+    bili_jct = credential.get("bili_jct") or ""
+    if not sessdata or not bili_jct:
+        return True
+    cookie_parts = [f"SESSDATA={sessdata}", f"bili_jct={bili_jct}"]
+    if credential.get("buvid3"):
+        cookie_parts.append(f"buvid3={credential['buvid3']}")
+    headers = dict(DEFAULT_HEADERS)
+    headers["Cookie"] = "; ".join(cookie_parts)
+    headers["Origin"] = "https://www.bilibili.com"
+    async with httpx.AsyncClient(headers=headers, timeout=10, follow_redirects=False) as client:
+        resp = await client.post(
+            LOGOUT_API,
+            data={"biliCSRF": bili_jct, "gourl": "https://www.bilibili.com/"},
+        )
+        # 接口成功时通常 302 重定向（raise_for_status 会把 3xx 判为错误，需先放行）
+        if resp.is_redirect:
+            return True
+        resp.raise_for_status()
+        if "application/json" not in (resp.headers.get("content-type") or "").lower():
+            return True
+        payload = resp.json()
+        if payload.get("code") == 0:
+            return True
+        raise QrLoginError(payload.get("message") or "B站退出接口调用失败")
 
 
 def load_credential(path: Optional[str] = None) -> Optional[dict]:

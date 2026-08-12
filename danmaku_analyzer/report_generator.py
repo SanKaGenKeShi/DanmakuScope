@@ -29,7 +29,7 @@ class AnalysisReportGenerator:
         """初始化报告生成器（使用 ANALYSIS_REPORT_LLM 独立配置）"""
         llm_cfg = get_llm_settings()
 
-        self.client = analysis_report_async_client(timeout=120.0)  # 报告生成可能需要更长时间
+        self.client = analysis_report_async_client(timeout=llm_cfg.ANALYSIS_REPORT_LLM_TIMEOUT)
         self.model = llm_cfg.ANALYSIS_REPORT_LLM_MODEL
         self.temperature = llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE
         self.enable_thinking = llm_cfg.ANALYSIS_REPORT_LLM_ENABLE_THINKING
@@ -150,7 +150,10 @@ class AnalysisReportGenerator:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=self.temperature,
-                extra_body={"enable_thinking": self.enable_thinking},
+                extra_body={
+                    "enable_thinking": self.enable_thinking,
+                    "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
+                },
             )
         report_content = response.choices[0].message.content
         if not report_content:

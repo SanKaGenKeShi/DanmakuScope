@@ -147,13 +147,117 @@ class PromptBuilder:
             user_prompt=user_prompt,
             prompt_version=self.prompt_version,
         )
-    
+
+    def build_system_prompt_batch(self, tname: str, tags: List[str]) -> str:
+        """段内批量模式系统提示词：社会语境与正字法指令与单条模式一致，输出格式改为按编号的 items 数组"""
+        base = self.build_system_prompt(tname, tags)
+        marker = "【输出格式要求】"
+        head = base.split(marker)[0]
+        sf_lines = "\n".join(f"   - {label}: {desc}" for label, desc in SENTENCE_FUNCTION_TYPES)
+        return f"""{head}【输出格式要求（批量模式）】
+输入为多条编号弹幕，请对每一条独立分析，并将结果按输入编号顺序放入 items 数组。
+严格要求：items 元素个数必须与输入条数完全一致，不得遗漏或合并任何一条。
+请严格按照以下 JSON 格式输出，不要添加任何额外文字：
+```json
+{{
+    "items": [
+        {{
+            "emotion": {{"label": "positive | neutral | negative", "confidence": 0.95}},
+            "cooperative_principle": {{"violated": false, "maxim": "quality | quantity | relation | manner"}},
+            "interaction_type": {{"label": "check_in | identity_claim | mocking | info_request | expression | other", "confidence": 0.88}},
+            "sentence_function": {{"label": "{SENTENCE_FUNCTION_LABELS}", "confidence": 0.92}},
+            "orthography": {{
+                "status": "standard | community_variant | non_standard_typo",
+                "confidence": 0.98
+            }}
+        }}
+    ]
+}}
+```
+
+【分析维度说明】
+1. emotion（情感倾向）：positive（积极）、neutral（中性）、negative（消极）
+2. cooperative_principle（合作原则）：
+   - violated: 是否违反合作原则
+   - maxim: 违反了哪条准则（quality-质量、quantity-数量、relation-关联、manner-方式）
+3. interaction_type（互动诉求类型）：
+   - check_in: 打卡/签到
+   - identity_claim: 身份认同
+   - mocking: 嘲讽/调侃
+   - info_request: 信息请求
+   - expression: 情感表达
+   - other: 其他
+4. sentence_function（言语行为/句类）：
+{sf_lines}
+5. orthography（正字法状态）：
+   - standard: 标准汉语
+   - community_variant: 社群变体（梗、谐音、缩写等）
+   - non_standard_typo: 非标准笔误
+"""
+
+    def build_complex_prompt_batch(
+        self,
+        tname: str,
+        tags: List[str],
+        items: List[tuple],
+    ) -> PromptComponents:
+        """段内批量复杂任务提示词：items 为 (弹幕内容, 微语境文本) 列表"""
+        system_prompt = self.build_system_prompt_batch(tname, tags)
+        blocks = []
+        for idx, (content, context_text) in enumerate(items, 1):
+            block = f"【第{idx}条】"
+            if context_text:
+                block += f"\n【微语境】\n{context_text}"
+            block += f"\n【待分析弹幕】\n{content}"
+            blocks.append(block)
+        user_prompt = (
+            f"以下共 {len(items)} 条待分析弹幕，请逐条分析并按编号顺序输出 items 数组：\n\n"
+            + "\n\n".join(blocks)
+        )
+        return PromptComponents(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            prompt_version=self.prompt_version,
+        )
+
     def build_simple_prompt(self, danmaku_content: str) -> PromptComponents:
         system_prompt = "你是一位语言学家，专门分析句子的言语行为类型。"
         user_prompt = self.build_sentence_function_prompt(danmaku_content)
         
         return PromptComponents(
             system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            prompt_version=self.prompt_version,
+        )
+
+    def build_simple_prompt_batch(self, contents: List[str]) -> PromptComponents:
+        """段内批量简单任务提示词：逐条编号输入，按编号输出 sentence_function 数组"""
+        sf_block = "\n".join(f"- {label}: {desc}" for label, desc in SENTENCE_FUNCTION_TYPES)
+        numbered = "\n".join(f"【第{idx}条】{content}" for idx, content in enumerate(contents, 1))
+        user_prompt = f"""请逐条判断以下 {len(contents)} 条弹幕的言语行为类型（句类），每条独立判断，不得遗漏或合并。
+
+{numbered}
+
+【输出格式要求】
+请严格按照以下 JSON 格式输出，items 元素个数必须与输入条数完全一致，顺序与编号对应，不要添加任何额外文字：
+```json
+{{
+    "items": [
+        {{
+            "sentence_function": {{
+                "label": "{SENTENCE_FUNCTION_LABELS}",
+                "confidence": 0.92
+            }}
+        }}
+    ]
+}}
+```
+
+【句类说明】
+{sf_block}
+"""
+        return PromptComponents(
+            system_prompt="你是一位语言学家，专门分析句子的言语行为类型。",
             user_prompt=user_prompt,
             prompt_version=self.prompt_version,
         )

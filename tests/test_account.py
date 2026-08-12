@@ -2,11 +2,18 @@
 account.py 单元测试 - 凭证转换与 Cookie 提取（纯函数，无网络依赖）
 """
 
+import asyncio
+import json
+
 import httpx
+import pytest
 
 from danmaku_analyzer.account import (
     _to_credential,
     _extract_cookies,
+    logout,
+    remote_logout,
+    QrLoginError,
     COOKIE_KEYS,
 )
 
@@ -83,3 +90,62 @@ class TestExtractCookies:
 
     def test_COOKIE_KEYS包含buvid3(self):
         assert "buvid3" in COOKIE_KEYS
+
+
+class TestLogout:
+
+    def test_删除已保存凭证(self, tmp_path):
+        path = tmp_path / "credential.json"
+        path.write_text(json.dumps({"sessdata": "s1"}), encoding="utf-8")
+        assert logout(str(path)) is True
+        assert not path.exists()
+
+    def test_无凭证文件返回False(self, tmp_path):
+        assert logout(str(tmp_path / "missing.json")) is False
+
+
+class _FakeLogoutClient:
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, data=None):
+        self.posted = (url, data)
+        return self._resp
+
+
+def _logout_resp(content_type: str, body: str, status_code: int = 200) -> httpx.Response:
+    return httpx.Response(
+        status_code,
+        headers={"content-type": content_type},
+        content=body.encode("utf-8"),
+        request=httpx.Request("POST", "https://passport.bilibili.com/login/exit/v2"),
+    )
+
+
+class TestRemoteLogout:
+
+    def test_JSON成功响应(self, monkeypatch):
+        fake = _FakeLogoutClient(_logout_resp("application/json", '{"code": 0, "status": true}'))
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: fake)
+        assert asyncio.run(remote_logout({"sessdata": "s1", "bili_jct": "j1", "buvid3": "b1"})) is True
+        assert fake.posted[1]["biliCSRF"] == "j1"
+
+    def test_重定向HTML响应视为成功(self, monkeypatch):
+        fake = _FakeLogoutClient(_logout_resp("text/html", "<html></html>", status_code=302))
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: fake)
+        assert asyncio.run(remote_logout({"sessdata": "s1", "bili_jct": "j1"})) is True
+
+    def test_缺少bili_jct直接视为已退出(self):
+        assert asyncio.run(remote_logout({"sessdata": "s1"})) is True
+
+    def test_接口业务报错抛出(self, monkeypatch):
+        fake = _FakeLogoutClient(_logout_resp("application/json", '{"code": -111, "message": "csrf 校验失败"}'))
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: fake)
+        with pytest.raises(QrLoginError):
+            asyncio.run(remote_logout({"sessdata": "s1", "bili_jct": "j1"}))

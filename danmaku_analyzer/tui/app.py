@@ -6,17 +6,77 @@ import threading
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingsMap
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Button, Input, Label, Static, Switch, TextArea
 
 from ..utils.logger import get_logger
-from .i18n import apply_saved_prefs, i18n, load_prefs, save_prefs
+from ..prefs import apply_saved_prefs, load_prefs, save_prefs
+from .i18n import i18n
 from .screens import SettingsScreen
 
 logger = get_logger(__name__)
 
 _MARKUP_RE = re.compile(r"\[/?[a-zA-Z#][^\]]*\]")
+
+_LOGO_LETTERS = {
+    "D": (
+        "██████╗ ",
+        "██╔══██╗",
+        "██║  ██║",
+        "██║  ██║",
+        "██████╔╝",
+        "╚═════╝ ",
+    ),
+    "A": (
+        " █████╗ ",
+        "██╔══██╗",
+        "███████║",
+        "██╔══██║",
+        "██║  ██║",
+        "╚═╝  ╚═╝",
+    ),
+    "N": (
+        "███╗   ██╗",
+        "████╗  ██║",
+        "██╔██╗ ██║",
+        "██║╚██╗██║",
+        "██║ ╚████║",
+        "╚═╝  ╚═══╝",
+    ),
+    "M": (
+        "███╗   ███╗",
+        "████╗ ████║",
+        "██╔████╔██║",
+        "██║╚██╔╝██║",
+        "██║ ╚═╝ ██║",
+        "╚═╝     ╚═╝",
+    ),
+    "K": (
+        "██╗  ██╗",
+        "██║ ██╔╝",
+        "█████╔╝ ",
+        "██╔═██╗ ",
+        "██║  ██╗",
+        "╚═╝  ╚═╝",
+    ),
+    "U": (
+        "██╗   ██╗",
+        "██║   ██║",
+        "██║   ██║",
+        "██║   ██║",
+        "╚██████╔╝",
+        " ╚═════╝ ",
+    ),
+}
+
+
+def _logo_text() -> str:
+    """逐行拼接 ANSI Shadow 字体字母，生成 DANMAKU 巨型徽标"""
+    rows = []
+    for row in range(6):
+        rows.append(" ".join(_LOGO_LETTERS[ch][row] for ch in "DANMAKU"))
+    return "\n".join(rows)
 
 
 class CompareRequested(Message):
@@ -40,6 +100,7 @@ class DanmakuTUI(App):
 
     TITLE = "DanmakuScope"
     ENABLE_COMMAND_PALETTE = False
+    ALLOW_SELECT = False
     UPDATE_INTERVAL = 1 / 120
 
     CSS = """
@@ -77,9 +138,87 @@ class DanmakuTUI(App):
     #mode-buttons Button {
         margin-left: 1;
         min-width: 12;
+        height: 100%;
+        padding: 0 2;
+        border: none;
+    }
+
+    /* Textual 默认按钮上下各一道 tall 边框，primary 切换时边框明暗反转，
+       观感如按钮错位一格；模式按钮压平并以主题色加粗文字表达选中态 */
+    #mode-buttons Button.-primary {
+        color: $accent;
+        text-style: bold;
+    }
+
+    /* 标题栏设置小按钮：与模式按钮拉开间距，宽度收窄（双 id 压过 #mode-buttons Button 规则） */
+    #mode-buttons #btn-settings {
+        min-width: 8;
+        margin-left: 2;
+    }
+
+    #home-panel {
+        margin: 1 2;
+        padding: 1 6;
+        background: $background;
+        align-vertical: middle;
+    }
+
+    #home-content {
+        width: 100%;
+        height: auto;
+    }
+
+    .home-logo {
+        text-align: center;
+        color: $accent;
+        text-style: bold;
+        margin-top: 1;
+    }
+
+    .home-tagline {
+        text-align: center;
+        color: $text-muted;
+        margin: 1 0;
+    }
+
+    .home-section {
+        border: round $primary;
+        padding: 1 2;
+        margin-bottom: 1;
+        height: auto;
+    }
+
+    .home-section-title {
+        color: $accent;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    .home-keys {
+        height: auto;
+    }
+
+    .home-keys-col {
+        width: 1fr;
+        height: auto;
+    }
+
+    .home-hint {
+        text-align: center;
+        color: $text-muted;
+        margin: 1 0;
     }
 
     #log-panel {
+        display: none;
+        margin: 1 2;
+        border: round $secondary;
+        background: $surface;
+        padding: 0 1;
+    }
+
+    #compare-log-panel {
+        display: none;
         margin: 1 2;
         border: round $secondary;
         background: $surface;
@@ -95,6 +234,7 @@ class DanmakuTUI(App):
     }
 
     #bottom-bar {
+        display: none;
         dock: bottom;
         height: 3;
         layout: horizontal;
@@ -163,12 +303,20 @@ class DanmakuTUI(App):
 
     _BASE_BINDINGS = [
         ("ctrl+a", "analyze", "binding.analyze", False),
-        ("ctrl+i", "show_config", "binding.config", True),
         ("ctrl+s", "settings", "binding.settings", True),
         ("ctrl+v", "paste_input", "binding.paste", True),
         ("ctrl+c", "copy_selection", "binding.copy_selection", True),
         ("ctrl+q", "quit", "binding.quit", True),
     ]
+
+    _mode = "home"
+    _task_worker = None
+
+    _MODE_PANEL = {
+        "single": "#log-panel",
+        "compare": "#compare-log-panel",
+        "log": "#tui-log-panel",
+    }
 
     @property
     def SUB_TITLE(self) -> str:
@@ -178,10 +326,32 @@ class DanmakuTUI(App):
         with Horizontal(id="title-bar"):
             yield Static(self._title_text(), id="title-text")
             with Horizontal(id="mode-buttons"):
-                yield Button(i18n.t("mode.single"), variant="primary", id="btn-mode-single")
+                yield Button(i18n.t("mode.home"), variant="primary", id="btn-mode-home")
+                yield Button(i18n.t("mode.single"), id="btn-mode-single")
                 yield Button(i18n.t("mode.compare"), id="btn-mode-compare")
                 yield Button(i18n.t("mode.log"), id="btn-mode-log")
+                yield Button(i18n.t("btn.settings"), id="btn-settings")
+        with VerticalScroll(id="home-panel"):
+            with Vertical(id="home-content"):
+                yield Static(_logo_text(), classes="home-logo", markup=False)
+                yield Static(self._home_tagline(), classes="home-tagline")
+                with Vertical(classes="home-section"):
+                    yield Static(f"01 · {i18n.t('app.home_section_start')}", classes="home-section-title")
+                    yield Static(self._home_steps_markup())
+                with Vertical(classes="home-section"):
+                    yield Static(f"02 · {i18n.t('app.home_section_keys')}", classes="home-section-title")
+                    with Horizontal(classes="home-keys"):
+                        with Vertical(classes="home-keys-col"):
+                            yield Static(self._home_key_line("Ctrl+A", "app.shortcut_analyze"))
+                            yield Static(self._home_key_line("Ctrl+S", "app.shortcut_settings"))
+                            yield Static(self._home_key_line("Ctrl+V", "app.shortcut_paste"))
+                        with Vertical(classes="home-keys-col"):
+                            yield Static(self._home_key_line("Ctrl+C", "app.shortcut_copy"))
+                            yield Static(self._home_key_line("Alt+Enter", "app.shortcut_compare"))
+                            yield Static(self._home_key_line("Ctrl+Q", "app.shortcut_quit"))
+                yield Static(i18n.t("app.hint"), classes="home-hint")
         yield TextArea("", id="log-panel", read_only=True, show_line_numbers=False)
+        yield TextArea("", id="compare-log-panel", read_only=True, show_line_numbers=False)
         yield TextArea("", id="tui-log-panel", read_only=True, show_line_numbers=False)
         with Horizontal(id="compare-controls"):
             with Vertical(id="compare-input-col"):
@@ -191,24 +361,57 @@ class DanmakuTUI(App):
                 yield CompareArea(id="compare-area", placeholder=i18n.t("compare.placeholder"))
             with Vertical(id="compare-buttons"):
                 yield Button(i18n.t("compare.start"), variant="primary", id="btn-compare")
-                yield Button(i18n.t("btn.show_config"), id="btn-config-2")
-                yield Button(i18n.t("btn.settings"), id="btn-settings-2")
+                yield Button(i18n.t("btn.cancel_task"), variant="warning", id="btn-cancel-task-2", disabled=True)
+                yield Button(i18n.t("btn.clear"), id="btn-clear-2")
         with Horizontal(id="bottom-bar"):
             yield Input(placeholder=i18n.t("input.placeholder"), id="bvid-input")
             yield Button(i18n.t("btn.analyze"), variant="primary", id="btn-analyze")
             with Horizontal(id="bottom-actions"):
-                yield Button(i18n.t("btn.show_config"), id="btn-config")
-                yield Button(i18n.t("btn.settings"), id="btn-settings")
+                yield Button(i18n.t("btn.cancel_task"), variant="warning", id="btn-cancel-task", disabled=True)
+                yield Button(i18n.t("btn.clear"), id="btn-clear")
 
     def _title_text(self) -> str:
         return f"{self.TITLE} — {i18n.t('app.sub_title')}"
 
+    def _home_tagline(self) -> str:
+        from .. import __version__
+
+        return f"{i18n.t('app.desc')}  ·  v{__version__}"
+
+    def _home_steps_markup(self) -> str:
+        steps = [
+            i18n.t("app.step_input"),
+            i18n.t("app.step_analyze"),
+            i18n.t("app.step_result"),
+            i18n.t("app.step_compare"),
+        ]
+        return "\n".join(f"[$accent bold]{idx}[/] {step}" for idx, step in enumerate(steps, 1))
+
+    @staticmethod
+    def _home_key_line(key: str, i18n_key: str) -> str:
+        return f"[$accent bold] {key} [/]  {i18n.t(i18n_key)}"
+
     def on_mount(self) -> None:
         apply_saved_prefs()
         self._apply_binding_labels()
-        self.query_one("#bvid-input", Input).focus()
-        self._greet()
+        self._disable_decorative_focus()
         self._tui_log_sink_id = logger.add(self._tui_log_sink, level="INFO")
+
+    def _disable_decorative_focus(self) -> None:
+        """只读面板与操作按钮不可聚焦，消除点击后默认焦点样式的白底；输入控件不受影响"""
+        for widget in self.screen.query(Button):
+            widget.can_focus = False
+        for widget in self.screen.query(TextArea):
+            if widget.read_only:
+                widget.can_focus = False
+        self.query_one("#home-panel").can_focus = False
+        # 挂载期自动聚焦可能已落在上述控件上，需主动清除
+        if self.focused is not None and not self.focused.can_focus:
+            self.screen.set_focus(None)
+
+    def on_resize(self, event: events.Resize) -> None:
+        """窄屏下隐藏巨型徽标（68 列），避免自动折行破坏字形并挤占分区空间"""
+        self.query_one(".home-logo", Static).display = event.size.width >= 86
 
     def on_unmount(self) -> None:
         sink_id = getattr(self, "_tui_log_sink_id", None)
@@ -232,51 +435,37 @@ class DanmakuTUI(App):
         panel.insert(prefix + line)
         panel.move_cursor(panel.document.end)
 
-    def _greet(self) -> None:
-        from .. import __version__
-
-        self._log_lines(
-            [
-                f"{i18n.t('app.welcome')}  v{__version__}",
-                i18n.t("app.desc"),
-                "",
-                i18n.t("app.quick_start"),
-                f"  1. {i18n.t('app.step_input')}",
-                f"  2. {i18n.t('app.step_analyze')}",
-                f"  3. {i18n.t('app.step_result')}",
-                f"  4. {i18n.t('app.step_compare')}",
-                "",
-                i18n.t("app.hint"),
-            ]
-        )
-
     @property
-    def _log_panel(self) -> TextArea:
-        return self.query_one("#log-panel", TextArea)
+    def _visible_panel(self) -> TextArea:
+        return self.query_one(self._MODE_PANEL[self._mode], TextArea)
 
-    def _log_lines(self, lines: list[str]) -> None:
-        """向日志面板追加纯文本行（TextArea 不支持 Rich markup，先剥离标签）"""
-        panel = self._log_panel
+    def _log_lines(self, lines: list[str], panel_id: str = "#log-panel") -> None:
+        """向指定输出面板追加纯文本行（TextArea 不支持 Rich markup，先剥离标签）"""
+        panel = self.query_one(panel_id, TextArea)
         text = "\n".join(_MARKUP_RE.sub("", line) for line in lines)
         prefix = "\n" if panel.text else ""
         panel.move_cursor(panel.document.end)
         panel.insert(prefix + text)
         panel.move_cursor(panel.document.end)
 
-    def _log_lines_threadsafe(self, lines: list[str]) -> None:
+    def _log_lines_threadsafe(self, lines: list[str], panel_id: str = "#log-panel") -> None:
         """进度回调可能在应用线程或工作线程触发，按线程路由避免 call_from_thread 同线程报错"""
         if threading.get_ident() == self._thread_id:
-            self._log_lines(lines)
+            self._log_lines(lines, panel_id)
         else:
-            self.call_from_thread(self._log_lines, lines)
+            self.call_from_thread(self._log_lines, lines, panel_id)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-analyze":
             self.action_analyze()
-        elif event.button.id in ("btn-config", "btn-config-2"):
-            self.action_show_config()
-        elif event.button.id in ("btn-settings", "btn-settings-2"):
+        elif event.button.id in ("btn-clear", "btn-clear-2"):
+            self.action_clear()
+        elif event.button.id in ("btn-cancel-task", "btn-cancel-task-2"):
+            self.action_cancel_task()
+        elif event.button.id == "btn-settings":
             self.action_settings()
+        elif event.button.id == "btn-mode-home":
+            self._set_mode("home")
         elif event.button.id == "btn-mode-single":
             self._set_mode("single")
         elif event.button.id == "btn-mode-compare":
@@ -290,19 +479,22 @@ class DanmakuTUI(App):
         self.action_compare()
 
     def _set_mode(self, mode: str) -> None:
-        """切换个体/比对/日志三种模式：内容区与底部输入区互斥显示"""
-        compare = mode == "compare"
+        """切换主页/个体/比对/实时日志四种模式：内容区与底部输入区互斥显示，输出面板各自独立"""
+        self._mode = mode
         self.query_one("#bottom-bar").styles.display = "block" if mode == "single" else "none"
-        self.query_one("#compare-controls").styles.display = "block" if compare else "none"
-        self.query_one("#log-panel").styles.display = "none" if mode == "log" else "block"
+        self.query_one("#compare-controls").styles.display = "block" if mode == "compare" else "none"
+        self.query_one("#home-panel").styles.display = "block" if mode == "home" else "none"
+        self.query_one("#log-panel").styles.display = "block" if mode == "single" else "none"
+        self.query_one("#compare-log-panel").styles.display = "block" if mode == "compare" else "none"
         self.query_one("#tui-log-panel").styles.display = "block" if mode == "log" else "none"
         for btn_mode, btn_name in (
+            ("home", "#btn-mode-home"),
             ("single", "#btn-mode-single"),
             ("compare", "#btn-mode-compare"),
             ("log", "#btn-mode-log"),
         ):
             self.query_one(btn_name, Button).variant = "primary" if mode == btn_mode else "default"
-        if compare:
+        if mode == "compare":
             self.query_one("#compare-area", CompareArea).focus()
         elif mode == "single":
             self.query_one("#bvid-input", Input).focus()
@@ -334,7 +526,8 @@ class DanmakuTUI(App):
         if not input_str:
             self.notify(i18n.t("notify.empty_input"), severity="warning")
             return
-        self.run_worker(self._run_analysis(input_str), exclusive=True)
+        self._task_worker = self.run_worker(self._run_analysis(input_str), exclusive=True)
+        self._set_cancel_buttons_enabled(True)
 
     async def _run_analysis(self, input_str: str) -> None:
         from ..pipeline import analyze_video
@@ -366,6 +559,8 @@ class DanmakuTUI(App):
             logger.error(f"TUI 分析失败: {e}", exc_info=True)
             self._log_lines([f"✘ {i18n.t('log.failed')} {e}"])
             self.notify(i18n.t("notify.failed", error=e), severity="error")
+        finally:
+            self._on_task_finished()
 
     @staticmethod
     def _parse_compare_inputs(text: str) -> list[str]:
@@ -379,129 +574,68 @@ class DanmakuTUI(App):
             return
         reuse = self.query_one("#sw-reuse", Switch).value
         save_prefs({"compare_reuse": reuse})
-        self.run_worker(self._run_compare(inputs, reuse), exclusive=True)
+        self._task_worker = self.run_worker(self._run_compare(inputs, reuse), exclusive=True)
+        self._set_cancel_buttons_enabled(True)
 
     async def _run_compare(self, inputs: list[str], reuse: bool) -> None:
         from ..pipeline import compare_videos
 
-        self._log_lines([f"▶ {i18n.t('compare.begin', count=len(inputs))}"])
+        panel = "#compare-log-panel"
+        self._log_lines([f"▶ {i18n.t('compare.begin', count=len(inputs))}"], panel)
 
         def progress_callback(stage: str, message: str):
-            self._log_lines_threadsafe([f"  ✔ {stage} {message}"])
+            self._log_lines_threadsafe([f"  ✔ {stage} {message}"], panel)
 
         try:
             result = await compare_videos(inputs, reuse=reuse, progress=progress_callback)
             for item in result.items:
                 if item.ok:
                     status = i18n.t("compare.item_reused") if item.reused else i18n.t("log.done")
-                    self._log_lines([f"  • {item.bvid or item.raw_input}: {status}"])
+                    self._log_lines([f"  • {item.bvid or item.raw_input}: {status}"], panel)
                 else:
-                    self._log_lines([f"  • {item.raw_input}: {i18n.t('compare.item_failed')} {item.error}"])
+                    self._log_lines([f"  • {item.raw_input}: {i18n.t('compare.item_failed')} {item.error}"], panel)
             if result.summary_csv_path:
-                self._log_lines([f"  {i18n.t('compare.summary')}: {result.summary_csv_path}"])
+                self._log_lines([f"  {i18n.t('compare.summary')}: {result.summary_csv_path}"], panel)
             if result.statistics_csv_path:
-                self._log_lines([f"  {i18n.t('compare.statistics')}: {result.statistics_csv_path}"])
+                self._log_lines([f"  {i18n.t('compare.statistics')}: {result.statistics_csv_path}"], panel)
             if result.snapshot_path:
-                self._log_lines([f"  {i18n.t('compare.snapshot')}: {result.snapshot_path}"])
+                self._log_lines([f"  {i18n.t('compare.snapshot')}: {result.snapshot_path}"], panel)
             self.notify(i18n.t("compare.done"), severity="information")
         except Exception as e:
             logger.error(f"TUI 比对分析失败: {e}", exc_info=True)
-            self._log_lines([f"✘ {e}"])
+            self._log_lines([f"✘ {e}"], panel)
             self.notify(i18n.t("compare.failed", error=e), severity="error")
+        finally:
+            self._on_task_finished()
 
-    def action_show_config(self) -> None:
-        from ..config import get_settings
-        from ..llm_config import get_llm_settings
-
-        settings = get_settings()
-        llm_cfg = get_llm_settings()
-        self._remove_previous_config()
-
-        on = i18n.t("log.enabled")
-        off = i18n.t("log.disabled")
-
-        def flag(value: bool) -> str:
-            return on if value else off
-
-        lines = [i18n.t("log.config")]
-        lines.append(
-            f"  [{i18n.t('cfg.section_sampling')}] "
-            f"{i18n.t('log.segmentation')}: {settings.SEGMENTATION_MODE} | "
-            f"{i18n.t('log.min_samples')}: {settings.MIN_SEGMENT_SAMPLES} | "
-            f"{i18n.t('cfg.sampling_strategy')}: {i18n.t('settings.sampling_freq') if settings.ENABLE_FREQ_BASED_SAMPLING else i18n.t('settings.sampling_head')} | "
-            f"TOP_N: {settings.TOP_N} | "
-            f"{i18n.t('settings.confidence_level')}: {settings.CONFIDENCE_LEVEL} | "
-            f"{i18n.t('settings.llm_tokenizer')}: {flag(settings.ENABLE_LLM_TOKENIZER)} | "
-            f"{i18n.t('settings.context_window')}: {settings.CONTEXT_TIME_WINDOW}s | "
-            f"{i18n.t('settings.max_context_tokens')}: {settings.MAX_CONTEXT_TOKENS}"
-        )
-        lines.append(
-            f"  [{i18n.t('cfg.section_llm')}] "
-            f"{i18n.t('log.simple_llm')}: {llm_cfg.SIMPLE_LLM_MODEL} | "
-            f"{i18n.t('log.complex_llm')}: {llm_cfg.COMPLEX_LLM_MODEL} | "
-            f"{i18n.t('log.dual_path')}: {flag(llm_cfg.ENABLE_DUAL_PATH)} | "
-            f"JSD: {llm_cfg.JSD_THRESHOLD_LOW}/{llm_cfg.JSD_THRESHOLD_MEDIUM} | "
-            f"{i18n.t('cfg.concurrency')}: {settings.LLM_CONCURRENCY} | "
-            f"{i18n.t('settings.thinking')}(简/复/报): "
-            f"{flag(llm_cfg.SIMPLE_LLM_ENABLE_THINKING)}/"
-            f"{flag(llm_cfg.COMPLEX_LLM_ENABLE_THINKING)}/"
-            f"{flag(llm_cfg.ANALYSIS_REPORT_LLM_ENABLE_THINKING)}"
-        )
-        lines.append(
-            f"  [{i18n.t('cfg.report_llm')}] "
-            f"{i18n.t('log.llm_report')}: {flag(settings.ENABLE_LLM_ANALYSIS_REPORT)} | "
-            f"{i18n.t('settings.model_name')}: {llm_cfg.ANALYSIS_REPORT_LLM_MODEL} | "
-            f"Base URL: {llm_cfg.ANALYSIS_REPORT_LLM_BASE_URL} | "
-            f"{i18n.t('settings.report_temp')}: {llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE} | "
-            f"Prompt: {llm_cfg.PROMPT_VERSION}"
-        )
-        lines.append(
-            f"  [{i18n.t('cfg.section_corpus')}] "
-            f"{i18n.t('compare.reuse')}: {on if load_prefs().get('compare_reuse', True) else off} | "
-            f"{i18n.t('settings.corpus_statistics')}: {flag(settings.ENABLE_CORPUS_STATISTICS)} | "
-            f"{i18n.t('settings.corpus_min_videos')}: {settings.CORPUS_MIN_VIDEOS_PER_PARTITION} | "
-            f"{i18n.t('settings.corpus_zone_policy')}: {settings.CORPUS_ZONE_POLICY} | "
-            f"{i18n.t('settings.corpus_temporal')}: {flag(settings.ENABLE_TEMPORAL_GROUPING)} | "
-            f"{i18n.t('settings.corpus_granularity')}: {settings.TEMPORAL_GRANULARITY}"
-        )
-        lines.append(
-            f"  [{i18n.t('cfg.section_general')}] "
-            f"{i18n.t('settings.credential_status')}: {self._credential_status()}"
-        )
-        lines.append(
-            f"  [{i18n.t('cfg.section_paths')}] "
-            f"DATA_ROOT: {settings.DATA_ROOT}"
-        )
-        lines.append(
-            f"  [{i18n.t('cfg.section_interface')}] "
-            f"{i18n.t('settings.theme')}: {self.theme}"
-        )
-        self._log_lines(lines)
-        self._config_line_count = len(lines)
-
-    @staticmethod
-    def _credential_status() -> str:
-        from ..account import resolve_credential
-
-        credential, source = resolve_credential()
-        if credential is None:
-            return i18n.t("settings.credential_none")
-        if source == "login":
-            return i18n.t("settings.credential_login")
-        if source == "settings":
-            return i18n.t("settings.credential_env")
-        return i18n.t("settings.credential_none")
-
-    def _remove_previous_config(self) -> None:
-        """连续点击查看配置时，移除上一次的配置输出，避免刷屏"""
-        previous = getattr(self, "_config_line_count", 0)
-        if not previous:
+    def action_clear(self) -> None:
+        """清空当前模式对应的输出面板（主页内容为固定布局，不参与清屏）"""
+        if self._mode not in self._MODE_PANEL:
             return
-        panel = self._log_panel
-        doc = panel.document
-        start_row = max(0, doc.line_count - previous - 1)
-        panel.delete((start_row, 0), doc.end)
-        self._config_line_count = 0
+        self._visible_panel.clear()
+
+    def action_cancel_task(self) -> None:
+        """中断当前分析/比对任务（取消后台 worker，取消信号经 asyncio 传播至 HTTP 请求层）"""
+        worker = self._task_worker
+        if worker is None or not worker.is_running:
+            self.notify(i18n.t("notify.cancel_none"), severity="warning")
+            return
+        worker.cancel()
+        self._set_cancel_buttons_enabled(False)
+        panel_id = self._MODE_PANEL.get(self._mode, "#log-panel")
+        self._log_lines([f"✘ {i18n.t('notify.cancel_done')}"], panel_id)
+        self.notify(i18n.t("notify.cancel_done"), severity="information")
+
+    def _set_cancel_buttons_enabled(self, enabled: bool) -> None:
+        self.query_one("#btn-cancel-task", Button).disabled = not enabled
+        self.query_one("#btn-cancel-task-2", Button).disabled = not enabled
+
+    def _on_task_finished(self) -> None:
+        """任务结束恢复中断按钮；新任务运行中（旧任务被顶替取消）时不误禁用"""
+        worker = self._task_worker
+        if worker is not None and worker.is_running:
+            return
+        self._set_cancel_buttons_enabled(False)
 
     def action_settings(self) -> None:
         self.push_screen(SettingsScreen())
@@ -521,9 +655,11 @@ class DanmakuTUI(App):
             input_widget.focus()
 
     def action_copy_selection(self) -> None:
-        """将当前选中的文本复制到系统剪贴板"""
-        panel = self._log_panel
-        selected = panel.selected_text if panel.selection else ""
+        """将当前选中的文本复制到系统剪贴板（优先聚焦控件选区，其次当前输出面板，最后屏幕级选择）"""
+        selected = self._focused_selected_text()
+        if not selected and self._mode in self._MODE_PANEL:
+            panel = self._visible_panel
+            selected = panel.selected_text if panel.selection else ""
         if not selected:
             selected = self.screen.get_selected_text()
         if not selected:
@@ -533,6 +669,15 @@ class DanmakuTUI(App):
             self.notify(i18n.t("notify.copy_done"), severity="information")
         else:
             self.notify(i18n.t("notify.copy_failed"), severity="error")
+
+    def _focused_selected_text(self) -> str:
+        """聚焦控件的选中文本：Input 选区（screen 级选择不覆盖 Input 内部选区）与 TextArea 选区"""
+        focused = self.focused
+        if isinstance(focused, Input):
+            return focused.selected_text or ""
+        if isinstance(focused, TextArea):
+            return focused.selected_text if focused.selection else ""
+        return ""
 
     def _write_system_clipboard(self, text: str) -> bool:
         try:
@@ -650,5 +795,8 @@ def run_tui() -> None:
             loguru_logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
 
     logging.basicConfig(handlers=[_InterceptHandler()], level=logging.INFO, force=True)
+    # httpx/httpcore 的逐请求 INFO 日志属传输层噪声，压到 WARNING 避免刷屏实时日志面板
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     DanmakuTUI().run()

@@ -81,6 +81,7 @@ danmaku_analyzer/data/tui_prefs.json
 danmaku_analyzer/data/logs/*.log
 danmaku_analyzer/data/raw/*
 danmaku_analyzer/data/reports/*
+danmaku_analyzer/data/scheduler/*
 danmaku_analyzer/.pytest_cache/
 data/logs/*.log
 

@@ -41,6 +41,10 @@ class LLMSettings(BaseSettings):
         default=False,
         description="复杂任务 LLM 是否启用思考模式（独立配置）"
     )
+    COMPLEX_LLM_TIMEOUT: float = Field(
+        default=120.0,
+        description="复杂任务 LLM 请求超时（秒）"
+    )
     
     # 简单句类任务（sentence_function）
     SIMPLE_LLM_BASE_URL: str = Field(
@@ -62,6 +66,10 @@ class LLMSettings(BaseSettings):
     SIMPLE_LLM_ENABLE_THINKING: bool = Field(
         default=False,
         description="简单任务 LLM 是否启用思考模式（独立配置）"
+    )
+    SIMPLE_LLM_TIMEOUT: float = Field(
+        default=120.0,
+        description="简单任务 LLM 请求超时（秒）"
     )
     
     # 分析报告生成任务，独立配置（不再留空复用 COMPLEX_LLM；占位值表示未配置）
@@ -85,6 +93,10 @@ class LLMSettings(BaseSettings):
         default=False,
         description="分析报告 LLM 是否启用思考模式（独立配置）"
     )
+    ANALYSIS_REPORT_LLM_TIMEOUT: float = Field(
+        default=180.0,
+        description="分析报告 LLM 请求超时（秒，报告生成耗时长，默认高于分析任务）"
+    )
     
     ENABLE_DUAL_PATH: bool = Field(
         default=True, 
@@ -104,7 +116,7 @@ class LLMSettings(BaseSettings):
     )
     
     PROMPT_VERSION: str = Field(
-        default="v2.2.1", 
+        default="v2.3.0", 
         description="Prompt 版本"
     )
     

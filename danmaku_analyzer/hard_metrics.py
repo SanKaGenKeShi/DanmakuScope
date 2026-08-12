@@ -69,7 +69,7 @@ class HardMetricsAnalyzer:
             from .llm_config import get_llm_settings
             from .llm_factory import simple_async_client
             llm_cfg = get_llm_settings()
-            self.llm_client = simple_async_client(timeout=30.0)
+            self.llm_client = simple_async_client(timeout=llm_cfg.SIMPLE_LLM_TIMEOUT)
             self.llm_model = llm_cfg.SIMPLE_LLM_MODEL
             self.enable_thinking = llm_cfg.SIMPLE_LLM_ENABLE_THINKING
             # 与主链路共用同一并发上限，所有 LLM 调用统一经此信号量限速
@@ -145,7 +145,10 @@ class HardMetricsAnalyzer:
                 "model": self.llm_model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.0,
-                "extra_body": {"enable_thinking": self.enable_thinking},
+                "extra_body": {
+                    "enable_thinking": self.enable_thinking,
+                    "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
+                },
             }
             async with self.llm_semaphore:
                 response = await self.llm_client.chat.completions.create(**kwargs)

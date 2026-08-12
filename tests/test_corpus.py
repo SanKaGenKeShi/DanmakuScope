@@ -193,6 +193,29 @@ class TestCorpusBuilder:
         assert len(summaries) == 2
         assert {s.zone_type for s in summaries} == {"hot_zone", "cold_zone"}
 
+    def test_共识CI样本不足字符串列不破坏聚合(self, tmp_path, tmp_store):
+        zip_path = make_fake_zip(tmp_path, "BV1ci", "游戏")
+        builder = CorpusBuilder()
+        metadata, tables = builder.read_zip(zip_path)
+        cons = tables["table_consensus_stats.csv"]
+        cons["high_consensus_ci_lower"] = float("nan")
+        cons["high_consensus_ci_upper"] = float("nan")
+        cons["high_consensus_ci_status"] = "insufficient_sample"
+        summaries = builder.summarize_video(metadata, {**tables, "table_consensus_stats.csv": cons})
+        assert len(summaries) == 1
+        assert summaries[0].scalars["high_consensus_rate"] == pytest.approx(0.6)
+        assert "high_consensus_ci_status" not in summaries[0].distributions
+
+    def test_未知字符串列跳过不崩溃(self):
+        builder = CorpusBuilder()
+        rows = [
+            {"zone_type": "hot_zone", "danmaku_count": 100, "some_metric": 0.5, "diag": "ok"},
+            {"zone_type": "hot_zone", "danmaku_count": 100, "some_metric": 0.7, "diag": "ok"},
+        ]
+        merged = builder._merge_rows(rows)
+        assert merged["some_metric"] == pytest.approx(0.6)
+        assert "diag" not in merged
+
     def test_prompt_version_mixed_warns(self, tmp_path, tmp_store):
         make_fake_zip(tmp_path, "BV1v1", "游戏", prompt_version="v2.2.0")
         make_fake_zip(tmp_path, "BV1v2", "游戏", prompt_version="v3.0.0")

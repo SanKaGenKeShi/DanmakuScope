@@ -32,7 +32,12 @@ TABLE_SPECS = {
     "table_interaction_type.csv": [],
 }
 
-NON_DIST_COLUMNS = {"tname", "zone_type", "danmaku_count"}
+# tname/zone_type/danmaku_count 为维度列；共识 CI 三列为组级诊断信息（样本不足时含字符串
+# 'insufficient_sample'），非分布观测，均不参与加权合并
+NON_DIST_COLUMNS = {
+    "tname", "zone_type", "danmaku_count",
+    "high_consensus_ci_lower", "high_consensus_ci_upper", "high_consensus_ci_status",
+}
 
 SCALAR_FIELDS = [
     "avg_word_length", "content_word_density", "punctuation_emoji_rate",
@@ -220,7 +225,18 @@ class CorpusBuilder:
         for col in all_columns:
             if col in NON_DIST_COLUMNS:
                 continue
-            values = [(r[col], w) for r, w in zip(rows, weights) if pd.notna(r.get(col))]
+            values = []
+            for r, w in zip(rows, weights):
+                raw = r.get(col)
+                if pd.isna(raw):
+                    continue
+                try:
+                    values.append((float(raw), w))
+                except (TypeError, ValueError):
+                    # 未知字符串列（如旧版 ZIP 携带的诊断字段）不视为分布，跳过并告警
+                    logger.warning(f"列 {col} 含非数值内容，不参与语料库聚合")
+                    values = None
+                    break
             if not values:
                 continue
             merged[col] = sum(float(v) * w for v, w in values) / sum(w for _, w in values)
