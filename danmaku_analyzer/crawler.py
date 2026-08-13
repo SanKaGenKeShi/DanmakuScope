@@ -105,8 +105,8 @@ class BilibiliCrawler:
             raise
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    async def fetch_danmaku(self, bvid: str, cid: Optional[int] = None) -> List[DanmakuItem]:
-        """protobuf 分段接口拉取全量弹幕，失败回退 XML；两路均失败时 tenacity 指数退避重试"""
+    async def fetch_danmaku(self, bvid: str, cid: Optional[int] = None) -> tuple[List[DanmakuItem], Literal["protobuf", "xml"]]:
+        """protobuf 分段接口拉取全量弹幕，失败回退 XML（返回来源标记）；两路均失败时 tenacity 指数退避重试"""
         logger.info(f"开始获取弹幕（protobuf 分段接口），BVID: {bvid}")
         
         try:
@@ -117,11 +117,12 @@ class BilibiliCrawler:
             danmaku_list = self._convert_danmakus(raw_danmakus)
             
             logger.info(f"弹幕获取成功，共 {len(danmaku_list)} 条")
-            return danmaku_list
+            return danmaku_list, "protobuf"
             
         except Exception as e:
             logger.warning(f"protobuf 接口获取弹幕失败: {e}，回退到 XML 接口")
-            return await self._fetch_danmaku_xml_fallback(bvid, cid)
+            danmaku_list = await self._fetch_danmaku_xml_fallback(bvid, cid)
+            return danmaku_list, "xml"
     
     def _convert_danmakus(self, raw_danmakus) -> List[DanmakuItem]:
         """bilibili-api Danmaku 对象 → 内部 DanmakuItem"""
@@ -233,9 +234,9 @@ class BilibiliCrawler:
             logger.error(f"获取视频CID失败: {e}")
             raise
     
-    async def fetch_all(self, bvid: str) -> tuple[VideoMeta, List[DanmakuItem]]:
+    async def fetch_all(self, bvid: str) -> tuple[VideoMeta, List[DanmakuItem], Literal["protobuf", "xml"]]:
         meta = await self.fetch_video_metadata(bvid)
         # 透传元数据阶段已取得的 cid，XML 兜底路径无需再次 get_info
-        danmaku_list = await self.fetch_danmaku(bvid, cid=meta.cid or None)
-        return meta, danmaku_list
+        danmaku_list, source = await self.fetch_danmaku(bvid, cid=meta.cid or None)
+        return meta, danmaku_list, source
 

@@ -127,7 +127,12 @@ def batch(input_list: tuple, output: Optional[str], credential: Optional[str], f
         console.print("[red]请提供至少一个输入[/red]")
         sys.exit(1)
     
-    asyncio.run(_batch_async(list(input_list), output, credential, freq_based, top_n, no_cache))
+    try:
+        asyncio.run(_batch_async(list(input_list), output, credential, freq_based, top_n, no_cache))
+    except Exception as e:
+        console.print(f"[red]批量分析失败: {e}[/red]")
+        logger.error(f"批量分析失败: {e}", exc_info=True)
+        sys.exit(1)
 
 
 async def _batch_async(
@@ -266,7 +271,10 @@ async def _compare_async(input_list: List[str], output: Optional[str], reuse: bo
     if result.statistics_csv_path:
         console.print(f"  推断检验: {result.statistics_csv_path}")
     if result.snapshot_path:
-        console.print(f"  语料库快照: {result.snapshot_path}")
+        if result.snapshot_valid:
+            console.print(f"  语料库快照: {result.snapshot_path}")
+        else:
+            console.print(f"[yellow]  语料库快照打包校验失败（散落文件已保留）: {result.snapshot_path}[/yellow]")
 
     fail_count = sum(1 for item in result.items if not item.ok)
     if fail_count:

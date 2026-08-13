@@ -55,19 +55,28 @@ class CacheManager:
             logger.debug(f"缓存命中: {key}")
             return data["payload"]
         except Exception as e:
-            logger.error(f"读取缓存失败: {e}")
+            logger.error(f"读取缓存失败，删除损坏文件: {key} - {e}")
+            self.delete(key)
             return None
     
     def set(self, key: str, value: Any) -> bool:
+        """临时文件 + os.replace 原子写入，避免进程中断产生半截 pkl"""
         cache_path = self._get_cache_path(key)
+        tmp_path = cache_path + ".tmp"
         
         try:
-            with open(cache_path, 'wb') as f:
+            with open(tmp_path, 'wb') as f:
                 pickle.dump({"schema_version": CACHE_SCHEMA_VERSION, "payload": value}, f)
+            os.replace(tmp_path, cache_path)
             logger.debug(f"缓存设置成功: {key}")
             return True
         except Exception as e:
             logger.error(f"设置缓存失败: {e}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
             return False
     
     def delete(self, key: str) -> bool:

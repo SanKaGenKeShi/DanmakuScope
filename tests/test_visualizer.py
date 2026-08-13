@@ -49,6 +49,10 @@ class TestRenderRScript:
         script = visualizer.render_r_script(partitions=["音乐", "游戏"])
         assert 'partitions <- c("音乐", "游戏")' in script
 
+    def test_partition_names_with_quotes_escaped(self, visualizer):
+        script = visualizer.render_r_script(partitions=['含"引号'])
+        assert '"含\\"引号"' in script
+
     def test_empty_partitions_render_empty_vector(self, visualizer):
         script = visualizer.render_r_script()
         assert "partitions <- c()" in script

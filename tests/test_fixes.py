@@ -310,7 +310,7 @@ class TestFetchAllCidPassthrough:
 
         async def fake_danmaku(bvid, cid=None):
             captured["cid"] = cid
-            return []
+            return [], "protobuf"
 
         crawler.fetch_video_metadata = fake_metadata
         crawler.fetch_danmaku = fake_danmaku
@@ -332,7 +332,7 @@ class TestFetchAllCidPassthrough:
 
         async def fake_danmaku(bvid, cid=None):
             captured["cid"] = cid
-            return []
+            return [], "protobuf"
 
         crawler.fetch_video_metadata = fake_metadata
         crawler.fetch_danmaku = fake_danmaku

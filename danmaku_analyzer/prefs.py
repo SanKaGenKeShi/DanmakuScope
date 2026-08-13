@@ -40,7 +40,8 @@ def _prefs_path() -> str:
 
 
 def _env_path() -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    """LLM 配置写回目标：DATA_ROOT/.env（与读取侧优先级一致；正式安装下包目录不可写）"""
+    return get_settings().resolve_data_path(".env")
 
 
 def load_prefs() -> dict:
@@ -90,6 +91,12 @@ def write_llm_env(updates: dict, path: Optional[str] = None) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.writelines(lines)
+        # .env 承载 LLM API Key（及可能的 B 站凭证），与 credential.json 同标准收紧权限
+        if os.name == "posix":
+            try:
+                os.chmod(path, 0o600)
+            except OSError as e:
+                logger.warning(f".env 权限收紧失败（建议手动 chmod 600）: {e}")
     except OSError as e:
         logger.warning(f"LLM 配置写回 .env 失败（仅本次会话生效）: {e}")
 
@@ -101,4 +108,7 @@ def apply_saved_prefs() -> None:
     settings = get_settings()
     for key in PERSIST_SETTINGS_KEYS:
         if key in prefs:
-            setattr(settings, key, prefs[key])
+            try:
+                setattr(settings, key, prefs[key])
+            except Exception as e:
+                logger.warning(f"偏好键 {key} 赋值校验失败（手改或旧版残留），忽略该值: {e}")

@@ -27,27 +27,7 @@ from ...prefs import (
     write_llm_env,
 )
 from ..i18n import i18n
-
-_THEME_IDS = [
-    "textual-dark",
-    "textual-light",
-    "tokyo-night",
-    "dracula",
-    "nord",
-    "gruvbox",
-    "monokai",
-    "catppuccin-mocha",
-    "catppuccin-latte",
-    "catppuccin-frappe",
-    "catppuccin-macchiato",
-    "solarized-dark",
-    "solarized-light",
-    "rose-pine",
-    "rose-pine-moon",
-    "atom-one-dark",
-]
-
-_DEFAULT_THEME = "textual-dark"
+from ..themes import DEFAULT_THEME, THEME_IDS
 
 # 分析参数默认值（与 config.py 保持一致）
 _ANALYSIS_DEFAULTS = {
@@ -123,14 +103,13 @@ class SettingsScreen(ModalScreen[bool]):
     }
 
     #theme-options {
-        height: auto;
-        max-height: 20;
+        height: 1fr;
         margin: 1 0;
     }
 
     .setting-row {
         width: 100%;
-        height: 3;
+        height: 4;
         layout: horizontal;
     }
 
@@ -149,7 +128,7 @@ class SettingsScreen(ModalScreen[bool]):
     }
 
     .setting-row Switch {
-        margin: 1 0;
+        margin: 0;
     }
 
     .setting-row OptionList {
@@ -248,9 +227,12 @@ class SettingsScreen(ModalScreen[bool]):
             with TabbedContent(initial="tab-display"):
                 with TabPane(i18n.t("settings.tab_display"), id="tab-display"):
                     yield OptionList(
-                        *[Option(self._theme_label(theme_id), id=theme_id) for theme_id in _THEME_IDS],
+                        *[Option(self._theme_label(theme_id), id=theme_id) for theme_id in THEME_IDS],
                         id="theme-options",
                     )
+                    with Static(classes="setting-row"):
+                        yield Label(i18n.t("settings.animations"))
+                        yield Switch(self.app._animations, id="sw-animations")
                 with TabPane(i18n.t("settings.tab_general"), id="tab-general"):
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.credential_status"))
@@ -470,10 +452,11 @@ class SettingsScreen(ModalScreen[bool]):
         self.run_worker(self._refresh_credential_account(), exclusive=False)
 
     def _constrain_tab_panes(self) -> None:
-        """TabPane 默认 height:auto 会撑破小窗口，强制限高并启用滚动"""
+        """TabPane 默认 height:auto 会撑破小窗口，强制限高并启用滚动；
+        显示页签例外：其 OptionList 自带滚动，页签再滚会嵌套，改由列表独占滚动"""
         for pane in self.query(TabPane):
             pane.styles.height = "1fr"
-            pane.styles.overflow_y = "auto"
+            pane.styles.overflow_y = "hidden" if pane.id == "tab-display" else "auto"
 
     def _disable_decorative_focus(self) -> None:
         """按钮与只读表格不可聚焦，消除点击后默认焦点样式的白底；输入控件不受影响"""
@@ -490,10 +473,12 @@ class SettingsScreen(ModalScreen[bool]):
                 options.highlighted = index
                 return
 
-    def _select_current_theme(self) -> None:
+    def _select_theme_option(self, theme_id: str) -> None:
         theme_options = self.query_one("#theme-options", OptionList)
-        current = self.app.theme
-        theme_options.highlighted = _THEME_IDS.index(current) if current in _THEME_IDS else 0
+        theme_options.highlighted = THEME_IDS.index(theme_id) if theme_id in THEME_IDS else 0
+
+    def _select_current_theme(self) -> None:
+        self._select_theme_option(self.app.theme)
 
     def _theme_label(self, theme_id: str) -> str:
         return i18n.raw("settings.theme_names").get(theme_id, theme_id)
@@ -636,8 +621,9 @@ class SettingsScreen(ModalScreen[bool]):
         reset_btn.refresh()
 
     def _reset_appearance(self) -> None:
-        self.app.theme = _DEFAULT_THEME
-        self._select_current_theme()
+        """仅重置界面控件，不触碰运行时状态：点保存才生效落盘，取消则丢弃（主题选中态经 _select_theme_option 同步）"""
+        self._select_theme_option(DEFAULT_THEME)
+        self.query_one("#sw-animations", Switch).value = True
         self.notify(i18n.t("settings.reset_done"), severity="information")
 
     def _open_url(self, url: str) -> None:
@@ -722,9 +708,7 @@ class SettingsScreen(ModalScreen[bool]):
             target.insert_text_at_cursor(text)
 
     def _reset_analysis(self) -> None:
-        settings = get_settings()
-        for key, value in _ANALYSIS_DEFAULTS.items():
-            setattr(settings, key, value)
+        """仅重置界面控件不修改配置单例：点保存才生效落盘，取消则丢弃"""
         self._highlight_option("#seg-mode-options", _ANALYSIS_DEFAULTS["SEGMENTATION_MODE"])
         self.query_one("#inp-min-samples", Input).value = str(_ANALYSIS_DEFAULTS["MIN_SEGMENT_SAMPLES"])
         self.query_one("#sw-freq-sampling", Switch).value = _ANALYSIS_DEFAULTS["ENABLE_FREQ_BASED_SAMPLING"]
@@ -737,8 +721,6 @@ class SettingsScreen(ModalScreen[bool]):
         self.query_one("#inp-tokenizer-min-len", Input).value = str(_ANALYSIS_DEFAULTS["LLM_TOKENIZER_MIN_LENGTH"])
         self.query_one("#inp-context-window", Input).value = str(_ANALYSIS_DEFAULTS["CONTEXT_TIME_WINDOW"])
         self.query_one("#inp-max-context-tokens", Input).value = str(_ANALYSIS_DEFAULTS["MAX_CONTEXT_TOKENS"])
-        for key, value in _CORPUS_DEFAULTS.items():
-            setattr(settings, key, value)
         self.query_one("#inp-corpus-min-videos", Input).value = str(_CORPUS_DEFAULTS["CORPUS_MIN_VIDEOS_PER_PARTITION"])
         self._highlight_option("#zone-policy-options", _CORPUS_DEFAULTS["CORPUS_ZONE_POLICY"])
         self.query_one("#sw-temporal-grouping", Switch).value = _CORPUS_DEFAULTS["ENABLE_TEMPORAL_GROUPING"]
@@ -748,9 +730,7 @@ class SettingsScreen(ModalScreen[bool]):
         self.notify(i18n.t("settings.reset_done"), severity="information")
 
     def _reset_llm(self) -> None:
-        llm_cfg = get_llm_settings()
-        for key, value in _LLM_DEFAULTS.items():
-            setattr(llm_cfg, key, value)
+        """仅重置界面控件与思考状态缓存不修改配置单例：点保存才生效落盘，取消则丢弃"""
         self.query_one("#sw-dual-path", Switch).value = _LLM_DEFAULTS["ENABLE_DUAL_PATH"]
         self.query_one("#inp-jsd-low", Input).value = str(_LLM_DEFAULTS["JSD_THRESHOLD_LOW"])
         self.query_one("#inp-jsd-medium", Input).value = str(_LLM_DEFAULTS["JSD_THRESHOLD_MEDIUM"])
@@ -775,6 +755,8 @@ class SettingsScreen(ModalScreen[bool]):
         theme = theme_options.get_option_at_index(theme_options.highlighted)
         if theme and str(theme.id) != self.app.theme:
             self.app.theme = str(theme.id)
+        animations = self.query_one("#sw-animations", Switch).value
+        self.app._set_animations(animations)
 
         seg_options = self.query_one("#seg-mode-options", OptionList)
         seg_mode = seg_options.get_option_at_index(seg_options.highlighted)
@@ -829,6 +811,8 @@ class SettingsScreen(ModalScreen[bool]):
 
         prefs = {key: getattr(settings, key) for key in PERSIST_SETTINGS_KEYS}
         prefs["compare_reuse"] = self.query_one("#sw-compare-reuse", Switch).value
+        prefs["theme"] = self.app.theme
+        prefs["animations"] = animations
         save_prefs(prefs)
         # LLM 配置写回 .env（.env 为 LLM 配置唯一数据源，CLI/TUI 启动时直接加载）
         write_llm_env({key: getattr(llm_cfg, key) for key in ENV_LLM_KEYS})

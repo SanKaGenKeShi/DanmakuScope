@@ -2,7 +2,7 @@
 
 B 站弹幕社会语言学分析工具（命令行 + 终端图形界面）。采集弹幕及视频元数据，经硬统计与 LLM 软标签双通道分析后，按官方分区（tname）聚合输出交叉统计表，为社会语言学/语料库语言学实证研究提供可溯源、可复核的语料数据。
 
-当前版本：**v0.3.2-beta**
+当前版本：**v0.3.3-beta**
 
 ---
 
@@ -40,6 +40,13 @@ git clone https://github.com/SanKaGenKeShi/DanmakuScope.git
 cd DanmakuScope
 pip install .
 # 开发环境：pip install -e ".[dev]"
+```
+
+或使用 [uv](https://docs.astral.sh/uv/)（仓库附带 `uv.lock` 锁文件，依赖可复现）：
+
+```bash
+uv sync                 # 运行环境（含项目本体）
+uv sync --extra dev     # 开发环境（pytest/ruff 等）
 ```
 
 ---
@@ -197,7 +204,7 @@ tests/
 
 - **CLI**：click, rich
 - **TUI**：textual
-- **配置**：pydantic-settings, python-dotenv
+- **配置**：pydantic-settings
 - **硬统计**：jieba（自定义词典）, regex, emoji
 - **语义分析**：openai SDK, tenacity, tiktoken
 - **统计**：scipy, numpy, ruptures

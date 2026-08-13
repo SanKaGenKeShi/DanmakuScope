@@ -6,14 +6,54 @@ LLM 配置模块 - 集中管理所有 LLM 相关配置
 import os
 from typing import List, Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
+
+# 与 config.py 的 DATA_ROOT 默认值保持一致
+_DEFAULT_DATA_ROOT = os.path.join("~", ".danmaku-scope")
+
+
+def _package_env_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
+def _read_env_file_value(path: str, key: str) -> str:
+    """直读 .env 中的 KEY=VALUE（配置加载阶段尚不能依赖 config 单例，避免循环导入）"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                k, v = stripped.split("=", 1)
+                if k.strip() == key:
+                    return v.strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _candidate_env_files() -> tuple:
+    """.env 候选清单：包内 .env 在前、DATA_ROOT/.env 在后——pydantic-settings 对 env_file 元组为“后者覆盖前者”，
+    故后位的 DATA_ROOT/.env 实际优先（实测 2.14.x 语义），包内 .env 兼容存量；缺失文件由 pydantic-settings 静默跳过。
+    相对 DATA_ROOT 与 config.py 同规则基于包目录父目录解析，不依赖 CWD"""
+    data_root = os.environ.get("DATA_ROOT", "").strip()
+    if not data_root:
+        data_root = _read_env_file_value(_package_env_path(), "DATA_ROOT")
+    data_root = os.path.expanduser(data_root or _DEFAULT_DATA_ROOT)
+    if not os.path.isabs(data_root):
+        project_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        data_root = os.path.normpath(os.path.join(project_parent, data_root))
+    data_root_env = os.path.join(data_root, ".env")
+    return tuple(dict.fromkeys([_package_env_path(), data_root_env]))
+
 
 # 两个 Settings 类共用的 .env 加载配置（单一定义，避免两处漂移）
 SETTINGS_MODEL_CONFIG = {
-    "env_file": os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    "env_file": _candidate_env_files(),
     "env_file_encoding": "utf-8",
     "case_sensitive": True,
     "extra": "ignore",
+    "validate_assignment": True,
 }
 
 
@@ -121,6 +161,13 @@ class LLMSettings(BaseSettings):
     )
     
     model_config = SETTINGS_MODEL_CONFIG
+
+    @field_validator("COMPLEX_LLM_TEMPERATURES")
+    @classmethod
+    def _validate_complex_temperatures(cls, v):
+        if not v:
+            raise ValueError("COMPLEX_LLM_TEMPERATURES 不能为空列表（至少需要一个推理温度）")
+        return v
 
 
 llm_settings: Optional[LLMSettings] = None

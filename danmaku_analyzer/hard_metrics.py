@@ -93,16 +93,25 @@ class HardMetricsAnalyzer:
                     logger.error(f"加载词典失败 {filename}: {e}")
     
     async def _tokenize_batch_async(self, danmaku_list: List[str]) -> List[List[Tuple[str, str]]]:
-        """批量分词：长文本并发走 LLM 分词（信号量限速，单条失败各自回退 jieba），其余直接 jieba"""
+        """批量分词：长文本并发走 LLM 分词（信号量限速，单条失败各自回退 jieba），其余 jieba 经 executor 不阻塞事件循环"""
+        loop = asyncio.get_running_loop()
         results: List[Optional[List[Tuple[str, str]]]] = [None] * len(danmaku_list)
         llm_indices = []
+        short_indices = []
         for i, text in enumerate(danmaku_list):
             if (self.enable_llm_tokenizer and
                 self.llm_client is not None and
                 len(text) >= self.llm_tokenizer_min_length):
                 llm_indices.append(i)
             else:
-                results[i] = list(pseg.cut(text))
+                short_indices.append(i)
+
+        if short_indices:
+            short_tokens = await loop.run_in_executor(
+                None, lambda: [list(pseg.cut(danmaku_list[i])) for i in short_indices]
+            )
+            for i, tokens in zip(short_indices, short_tokens):
+                results[i] = tokens
 
         if llm_indices:
             tasks = [self._llm_tokenize_safe(danmaku_list[i]) for i in llm_indices]
@@ -192,7 +201,10 @@ class HardMetricsAnalyzer:
                 )
             )
         tokenized_list = await self._tokenize_batch_async(danmaku_list)
-        return self._compute_stats(danmaku_list, tokenized_list)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: self._compute_stats(danmaku_list, tokenized_list)
+        )
 
     def _compute_stats(
         self,

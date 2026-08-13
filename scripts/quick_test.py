@@ -13,11 +13,11 @@ async def test():
     setup_logger(level='WARNING')
     crawler = BilibiliCrawler()
     try:
-        meta, danmaku_list = await crawler.fetch_all('BV1uu4y1s7TB')
+        meta, danmaku_list, source = await crawler.fetch_all('BV1uu4y1s7TB')
         print(f'标题: {meta.title}')
         print(f'分区: {meta.tname}')
         print(f'标签: {meta.tags[:5]}')
-        print(f'弹幕数: {len(danmaku_list)}')
+        print(f'弹幕数: {len(danmaku_list)}（来源: {source}）')
         print(f'播放量: {meta.view_count}')
         print(f'点赞: {meta.like_count}')
         

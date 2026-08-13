@@ -196,6 +196,11 @@ def save_credential(credential: dict, path: Optional[str] = None) -> str:
     os.makedirs(parent, exist_ok=True)
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(credential, f, ensure_ascii=False, indent=2)
+    if os.name == "posix":
+        try:
+            os.chmod(path, 0o600)
+        except OSError as e:
+            logger.warning(f"凭证文件权限收紧失败（建议手动 chmod 600）: {e}")
     return path
 
 

@@ -6,7 +6,7 @@ LLM 客户端模块 - 双路推理 + 四维输出（含正字法状态）
 
 import json
 import asyncio
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import regex
 from openai import AsyncOpenAI
@@ -189,8 +189,8 @@ class LLMClient:
     async def analyze_simple(
         self, 
         prompt_components: PromptComponents
-    ) -> SentenceFunctionOutput:
-        """单路推理，仅判断句类"""
+    ) -> Optional[SentenceFunctionOutput]:
+        """单路推理，仅判断句类；失败返回 None 由调用方保留复杂路自身句类，避免默认标签静默混入统计"""
         logger.info(f"开始简单任务分析（单路推理），模型: {self.simple_model}")
         
         try:
@@ -211,14 +211,14 @@ class LLMClient:
             
         except Exception as e:
             logger.error(f"简单任务分析失败: {e}")
-            return SentenceFunctionOutput()
+            return None
     
     async def analyze(
         self, 
         complex_prompt: PromptComponents,
         simple_prompt: PromptComponents
     ) -> DualPathResult:
-        """复杂+简单并行，用简单路结果覆盖句类"""
+        """复杂+简单并行，简单路成功时覆盖句类，失败时保留复杂路自身句类输出"""
         complex_task = self.analyze_complex(complex_prompt)
         simple_task = self.analyze_simple(simple_prompt)
         
@@ -226,7 +226,10 @@ class LLMClient:
             complex_task, simple_task
         )
         
-        complex_result.output.sentence_function = sentence_function
+        if sentence_function is not None:
+            complex_result.output.sentence_function = sentence_function
+        else:
+            logger.warning("简单路句类判断失败，保留复杂路自身句类输出")
         
         return complex_result
 
@@ -292,7 +295,10 @@ class LLMClient:
                 merged_output = merge_outputs(outputs, consensus_level)
             weight_multiplier = calculate_weight_multiplier(consensus_level, self.low_consensus_weight)
             sf_data = (simple_items[i] or {}).get("sentence_function", {})
-            merged_output.sentence_function = SentenceFunctionOutput.model_validate(sf_data)
+            if sf_data:
+                merged_output.sentence_function = SentenceFunctionOutput.model_validate(sf_data)
+            else:
+                logger.warning(f"批量模式第 {i} 条简单路句类缺失，保留复杂路自身句类输出")
             results.append(DualPathResult(
                 output=merged_output,
                 consensus_level=consensus_level,

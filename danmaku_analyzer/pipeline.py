@@ -73,9 +73,10 @@ class PipelineOptions:
 
 @dataclass
 class CrawlOutput:
-    """阶段 2 产出：视频元数据 + 弹幕"""
+    """阶段 2 产出：视频元数据 + 弹幕（含数据来源标记）"""
     meta: VideoMeta
     danmaku_list: List[DanmakuItem]
+    danmaku_source: str = "protobuf"
 
 
 @dataclass
@@ -189,17 +190,21 @@ async def _stage_crawl(bvid: str, options: PipelineOptions) -> CrawlOutput:
 
     if cached_data:
         meta, danmaku_list = cached_data
+        danmaku_source = "protobuf"
         options.progress("数据获取", f"缓存命中: {meta.title} ({len(danmaku_list)} 条弹幕)")
     else:
         if options.no_cache:
             options.progress("数据获取", "已禁用缓存，强制重新爬取")
-        meta, danmaku_list = await crawler.fetch_all(bvid)
-        # no_cache 或无凭证时跳过写入，避免不完整爬取结果污染缓存
-        if not options.no_cache and credential is not None:
+        meta, danmaku_list, danmaku_source = await crawler.fetch_all(bvid)
+        # no_cache/无凭证/XML 兜底（约 1000 条上限的截断样本）均跳过写入，避免污染 12h 缓存
+        if not options.no_cache and credential is not None and danmaku_source != "xml":
             cache.set(cache_key, (meta, danmaku_list))
+        if danmaku_source == "xml":
+            logger.warning(f"XML 兜底数据存在数量上限，结果不写入缓存: {bvid}")
+            options.progress("数据获取", "警告：protobuf 失败，XML 兜底数据有数量上限，本次结果不缓存")
         options.progress("数据获取", f"获取成功: {meta.title} ({len(danmaku_list)} 条弹幕)")
 
-    return CrawlOutput(meta=meta, danmaku_list=danmaku_list)
+    return CrawlOutput(meta=meta, danmaku_list=danmaku_list, danmaku_source=danmaku_source)
 
 
 async def _stage_preprocess(crawl: CrawlOutput, progress: ProgressCallback) -> PreprocessOutput:
@@ -391,10 +396,23 @@ async def _stage_aggregate(
 
 # Windows/通用文件系统文件名非法字符
 _UNSAFE_FILENAME_CHARS = '/\\:*?"<>|'
+# ZIP 文件名标题部分 UTF-8 字节上限（文件系统 255 字节限制下预留 [BV号] 前缀与 .zip 后缀）
+_ZIP_TITLE_MAX_BYTES = 150
 
 
 def _sanitize_zip_filename(title: str) -> str:
-    return title.translate({ord(c): "_" for c in _UNSAFE_FILENAME_CHARS})
+    """清洗非法字符、首尾空白与 Windows 禁止的尾随点/空格，并按 UTF-8 字节截断；空结果由调用方兜底"""
+    cleaned = title.translate({ord(c): "_" for c in _UNSAFE_FILENAME_CHARS})
+    cleaned = cleaned.strip()
+    while cleaned.endswith((".", " ")):
+        cleaned = cleaned[:-1]
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) > _ZIP_TITLE_MAX_BYTES:
+        cleaned = encoded[:_ZIP_TITLE_MAX_BYTES].decode("utf-8", errors="ignore")
+        # 截断后可能再次以点/空格结尾，需重新清洗
+        while cleaned.endswith((".", " ")):
+            cleaned = cleaned[:-1]
+    return cleaned
 
 
 def _build_kappa_records(analysis: SegmentAnalysisOutput) -> List[Dict]:
@@ -415,11 +433,23 @@ def _build_kappa_records(analysis: SegmentAnalysisOutput) -> List[Dict]:
 
 
 def _package_reports_zip(reports: dict, zip_path: str, progress: ProgressCallback) -> bool:
-    """ZIP 打包 + 完整性校验；校验通过后清理散落源文件"""
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for name, path in reports.items():
-            if os.path.exists(path):
-                zipf.write(path, os.path.basename(path))
+    """ZIP 打包 + 完整性校验；校验通过后清理散落源文件，写入异常/报告缺失时保留源文件返回失败"""
+    missing = [name for name, path in reports.items() if not os.path.exists(path)]
+    if missing:
+        logger.warning(f"报告文件缺失，仍尝试打包已有文件: {missing}")
+    if len(missing) == len(reports):
+        logger.error(f"全部报告文件缺失，放弃打包: {zip_path}")
+        progress("报告打包", f"打包失败: {os.path.basename(zip_path)}（报告文件缺失，源文件保留）")
+        return False
+    try:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for name, path in reports.items():
+                if os.path.exists(path):
+                    zipf.write(path, os.path.basename(path))
+    except OSError as e:
+        logger.error(f"报告打包失败（源文件保留）: {zip_path} - {e}")
+        progress("报告打包", f"打包失败: {os.path.basename(zip_path)}（源文件保留）")
+        return False
 
     zip_valid = validate_zip_archive(
         zip_path,
@@ -462,6 +492,7 @@ async def _stage_report(
         "pubdate": crawl.meta.pubdate.isoformat(),
         "view_count": crawl.meta.view_count,
         "danmaku_count": len(crawl.danmaku_list),
+        "danmaku_source": crawl.danmaku_source,
         "pipeline_version": __version__,
         "batch_segment_analysis": options.settings.ENABLE_BATCH_SEGMENT_ANALYSIS,
     }
@@ -480,7 +511,8 @@ async def _stage_report(
             progress("LLM报告", "LLM分析报告生成失败或未启用")
 
     progress("报告打包", "正在打包报告...")
-    zip_filename = f"[{bvid}]{_sanitize_zip_filename(crawl.meta.title)}.zip"
+    title_part = _sanitize_zip_filename(crawl.meta.title) or bvid
+    zip_filename = f"[{bvid}]{title_part}.zip"
     zip_path = os.path.join(options.use_output_dir, zip_filename)
     zip_valid = _package_reports_zip(reports, zip_path, progress)
 
@@ -511,6 +543,8 @@ class CompareResult:
 
 STATISTICAL_TESTS_FILENAME = "statistical_tests.csv"
 PROGRESS_RELPATH = os.path.join("scheduler", "progress.jsonl")
+# 进度文件字节上限，超出后轮转为按键去重的最新记录
+_PROGRESS_MAX_BYTES = 512 * 1024
 
 
 def _progress_file_path() -> str:
@@ -519,14 +553,49 @@ def _progress_file_path() -> str:
     return path
 
 
+def _relativize_zip_path(zip_path: str) -> str:
+    """优先存相对 DATA_ROOT 的路径（OUTPUT_DIR 迁移后 resume 仍有效）；跨驱动器或越层过深时回退绝对路径"""
+    data_root = get_settings().DATA_ROOT
+    try:
+        rel = os.path.relpath(zip_path, data_root)
+    except ValueError:
+        return zip_path
+    if rel.startswith(".." + os.sep):
+        depth = rel.count(".." + os.sep)
+        if depth > data_root.rstrip(os.sep).count(os.sep):
+            return zip_path
+    return rel
+
+
+def _resolve_progress_zip_path(stored: str) -> str:
+    if not stored or os.path.isabs(stored):
+        return stored
+    return get_settings().resolve_data_path(stored)
+
+
+def _rotate_progress_if_needed() -> None:
+    """进度文件只增不减，超阈值时按键去重重写（仅保留每视频最新记录）；临时文件 + os.replace 原子写防中断丢全部记录"""
+    path = _progress_file_path()
+    if not os.path.exists(path) or os.path.getsize(path) <= _PROGRESS_MAX_BYTES:
+        return
+    index = _load_progress()
+    tmp_path = path + ".tmp"
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        for record in index.values():
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    os.replace(tmp_path, path)
+    logger.info(f"进度文件超阈值，轮转为 {len(index)} 条最新记录")
+
+
 def _append_progress(raw_input: str, bvid: str, zip_path: str, reused: bool):
     """单项成功即追加 JSON Lines 记录，供中断后 --resume 无损继续"""
     record = {
         "input": raw_input, "bvid": bvid,
         "status": "reused" if reused else "ok",
-        "zip_path": zip_path,
+        "zip_path": _relativize_zip_path(zip_path),
         "timestamp": datetime.now().isoformat(timespec='seconds'),
     }
+    _rotate_progress_if_needed()
     with open(_progress_file_path(), 'a', encoding='utf-8') as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -558,7 +627,7 @@ def _try_resume_item(item: CompareItem, index: Dict[str, Dict], key: str, progre
     record = index.get(key)
     if not record:
         return False
-    zip_path = record.get("zip_path", "")
+    zip_path = _resolve_progress_zip_path(record.get("zip_path", ""))
     if not zip_path or not os.path.exists(zip_path):
         return False
     item.bvid = record.get("bvid", "") or item.bvid

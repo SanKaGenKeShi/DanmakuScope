@@ -111,6 +111,11 @@ cat("完成：corpus_boxplots.* / corpus_distributions.*\\n")
 
 class CorpusVisualizer:
 
+    @staticmethod
+    def _escape_r_string(value: str) -> str:
+        """R 字符串字面量转义：防分区名含反斜杠/双引号时破坏生成脚本语法"""
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
     def render_r_script(
         self,
         csv_filename: str = VIDEOS_CSV_FILENAME,
@@ -118,7 +123,7 @@ class CorpusVisualizer:
         stats_filename: str = STATS_CSV_FILENAME,
     ) -> str:
         scalars = ", ".join(f'"{name}"' for name in SCALAR_FIELDS)
-        partition_literal = ", ".join(f'"{name}"' for name in (partitions or []))
+        partition_literal = ", ".join(f'"{self._escape_r_string(name)}"' for name in (partitions or []))
         return R_SCRIPT_TEMPLATE.format(
             scalars=scalars,
             partitions=partition_literal,

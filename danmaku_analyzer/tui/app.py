@@ -1,6 +1,8 @@
 """TUI 主应用 - DanmakuScope 终端交互界面（OpenCode 风格）"""
 
+import asyncio
 import re
+import sys
 import threading
 
 from textual import events
@@ -14,6 +16,7 @@ from ..utils.logger import get_logger
 from ..prefs import apply_saved_prefs, load_prefs, save_prefs
 from .i18n import i18n
 from .screens import SettingsScreen
+from .themes import CUSTOM_THEMES, DEFAULT_THEME
 
 logger = get_logger(__name__)
 
@@ -141,6 +144,7 @@ class DanmakuTUI(App):
         height: 100%;
         padding: 0 2;
         border: none;
+        transition: color 0.25s in_out_cubic, background 0.25s in_out_cubic;
     }
 
     /* Textual 默认按钮上下各一道 tall 边框，primary 切换时边框明暗反转，
@@ -207,6 +211,11 @@ class DanmakuTUI(App):
         text-align: center;
         color: $text-muted;
         margin: 1 0;
+        transition: color 0.8s in_out_sine;
+    }
+
+    .anim-on .home-hint.-pulse {
+        color: $accent;
     }
 
     #log-panel {
@@ -311,6 +320,7 @@ class DanmakuTUI(App):
 
     _mode = "home"
     _task_worker = None
+    _animations = True
 
     _MODE_PANEL = {
         "single": "#log-panel",
@@ -393,9 +403,72 @@ class DanmakuTUI(App):
 
     def on_mount(self) -> None:
         apply_saved_prefs()
+        for theme in CUSTOM_THEMES.values():
+            self.register_theme(theme)
+        self._main_screen = self.screen
+        self._restore_appearance_prefs()
         self._apply_binding_labels()
         self._disable_decorative_focus()
         self._tui_log_sink_id = logger.add(self._tui_log_sink, level="INFO")
+        self._animate_home_entrance()
+        self.run_worker(self._preload_heavy_modules(), exclusive=False)
+
+    async def _preload_heavy_modules(self) -> None:
+        """后台线程预载重依赖：首次打开设置页会在 compose 内同步导入 account（拖入 bilibili_api/httpx），
+        首次分析会同步导入 pipeline（拖入 jieba/pandas），均造成界面卡顿，预载后移出关键路径"""
+        import importlib
+
+        for name in ("danmaku_analyzer.account", "danmaku_analyzer.pipeline", "openai"):
+            await asyncio.to_thread(importlib.import_module, name)
+
+    def _restore_appearance_prefs(self) -> None:
+        """恢复主题与动画偏好（Textual 不自动持久化主题，未知主题名回退默认主题）"""
+        prefs = load_prefs()
+        theme = prefs.get("theme", DEFAULT_THEME)
+        if theme in self.available_themes:
+            self.theme = theme
+        self._set_animations(bool(prefs.get("animations", True)))
+
+    def _set_animations(self, enabled: bool) -> None:
+        """动画总开关：以主屏 anim-on 类门控脉动色规则并启停脉动定时器，关闭即实时清除"""
+        self._animations = enabled
+        if enabled:
+            self._main_screen.add_class("anim-on")
+            if getattr(self, "_pulse_timer", None) is None:
+                self._pulse_timer = self.set_interval(0.8, self._toggle_hint_pulse)
+        else:
+            self._main_screen.remove_class("anim-on")
+            if getattr(self, "_pulse_timer", None) is not None:
+                self._pulse_timer.stop()
+                self._pulse_timer = None
+            self.query_one(".home-hint").remove_class("-pulse")
+
+    def _toggle_hint_pulse(self) -> None:
+        """主页底部提示呼吸脉动：定时切换 -pulse 类，颜色经 CSS transition 平滑过渡"""
+        if self._mode == "home":
+            self.query_one(".home-hint").toggle_class("-pulse")
+
+    def _animate_home_entrance(self) -> None:
+        """主页元素交错入场：透明度渐显，delay 递增"""
+        if not self._animations or self._mode != "home":
+            return
+        targets = [
+            self.query_one(".home-logo"),
+            self.query_one(".home-tagline"),
+            *self.query(".home-section"),
+            self.query_one(".home-hint"),
+        ]
+        for index, widget in enumerate(targets):
+            widget.styles.opacity = 0.0
+            widget.styles.animate("opacity", 1.0, duration=0.4, delay=index * 0.07, easing="out_quart")
+
+    def _animate_panel_in(self, mode: str) -> None:
+        """模式切换时目标面板渐显（动画关闭时跳过）"""
+        if not self._animations:
+            return
+        panel = self.query_one(self._MODE_PANEL.get(mode, "#home-panel"))
+        panel.styles.opacity = 0.0
+        panel.styles.animate("opacity", 1.0, duration=0.25, easing="out_quart")
 
     def _disable_decorative_focus(self) -> None:
         """只读面板与操作按钮不可聚焦，消除点击后默认焦点样式的白底；输入控件不受影响"""
@@ -494,6 +567,7 @@ class DanmakuTUI(App):
             ("log", "#btn-mode-log"),
         ):
             self.query_one(btn_name, Button).variant = "primary" if mode == btn_mode else "default"
+        self._animate_panel_in(mode)
         if mode == "compare":
             self.query_one("#compare-area", CompareArea).focus()
         elif mode == "single":
@@ -599,7 +673,10 @@ class DanmakuTUI(App):
             if result.statistics_csv_path:
                 self._log_lines([f"  {i18n.t('compare.statistics')}: {result.statistics_csv_path}"], panel)
             if result.snapshot_path:
-                self._log_lines([f"  {i18n.t('compare.snapshot')}: {result.snapshot_path}"], panel)
+                if result.snapshot_valid:
+                    self._log_lines([f"  {i18n.t('compare.snapshot')}: {result.snapshot_path}"], panel)
+                else:
+                    self._log_lines([f"  {i18n.t('compare.snapshot_invalid')}"], panel)
             self.notify(i18n.t("compare.done"), severity="information")
         except Exception as e:
             logger.error(f"TUI 比对分析失败: {e}", exc_info=True)
@@ -680,6 +757,8 @@ class DanmakuTUI(App):
         return ""
 
     def _write_system_clipboard(self, text: str) -> bool:
+        if sys.platform != "win32":
+            return self._write_clipboard_posix(text)
         try:
             import ctypes
 
@@ -721,6 +800,8 @@ class DanmakuTUI(App):
             return False
 
     def _read_system_clipboard(self) -> str:
+        if sys.platform != "win32":
+            return self._read_clipboard_posix()
         try:
             import ctypes
 
@@ -755,6 +836,39 @@ class DanmakuTUI(App):
                 user32.CloseClipboard()
         except Exception:
             return ""
+
+    # POSIX/macOS 降级：Textual 无跨平台剪贴板能力，依次探测 pbcopy(macOS)/wl-clipboard/xclip/xsel（均缺失时静默失败）
+    @staticmethod
+    def _run_clipboard_tool(cmd: list[str], input_bytes: bytes | None = None) -> bytes | None:
+        import shutil
+        import subprocess
+
+        if shutil.which(cmd[0]) is None:
+            return None
+        try:
+            result = subprocess.run(cmd, input=input_bytes, capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    def _write_clipboard_posix(self, text: str) -> bool:
+        data = text.encode("utf-8")
+        for cmd in (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]):
+            if self._run_clipboard_tool(cmd, input_bytes=data) is not None:
+                return True
+        return False
+
+    def _read_clipboard_posix(self) -> str:
+        for cmd in (
+            ["pbpaste"],
+            ["wl-paste", "--no-newline"],
+            ["xclip", "-selection", "clipboard", "-o"],
+            ["xsel", "--clipboard", "--output"],
+        ):
+            output = self._run_clipboard_tool(cmd)
+            if output is not None:
+                return output.decode("utf-8", errors="replace")
+        return ""
 
     def action_quit(self) -> None:
         self._quit()
