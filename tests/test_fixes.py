@@ -202,12 +202,20 @@ class TestOpenSystemTerminal:
         argvs = []
         monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: argvs.append(argv))
         monkeypatch.setattr(sys, "platform", platform)
-        DanmakuTUI._open_system_terminal(types.SimpleNamespace(notify=lambda *a, **k: None))
+        stub = types.SimpleNamespace(
+            notify=lambda *a, **k: None,
+            _cli_script_path=DanmakuTUI._cli_script_path,
+        )
+        DanmakuTUI._open_system_terminal(stub)
         return argvs
 
-    def test_macos_uses_open_terminal_app(self, monkeypatch):
+    def test_macos_uses_osascript_do_script(self, monkeypatch):
+        """`open -a Terminal` 会把参数当文件打开，执行命令须经 AppleScript do script"""
         argvs = self._launch("darwin", monkeypatch)
-        assert argvs == [["open", "-a", "Terminal", "danmaku-analyzer", "login"]]
+        assert argvs[0][:2] == ["osascript", "-e"]
+        script = argvs[0][2]
+        assert script.startswith('tell application "Terminal" to do script "')
+        assert "danmaku-analyzer" in script and script.rstrip('"').endswith("login")
 
     def test_linux_uses_x_terminal_emulator(self, monkeypatch):
         argvs = self._launch("linux", monkeypatch)
@@ -216,6 +224,24 @@ class TestOpenSystemTerminal:
     def test_windows_uses_cmd_start(self, monkeypatch):
         argvs = self._launch("win32", monkeypatch)
         assert argvs[0][:4] == ["cmd", "/c", "start", "cmd"]
+
+    def test_cli_script_path_prefers_sibling_of_executable(self, monkeypatch, tmp_path):
+        from danmaku_analyzer.tui.app import DanmakuTUI
+        exe = tmp_path / "python"
+        exe.write_text("")
+        script = tmp_path / "danmaku-analyzer"
+        script.write_text("")
+        monkeypatch.setattr(sys, "executable", str(exe))
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert DanmakuTUI._cli_script_path() == str(script)
+
+    def test_cli_script_path_falls_back_to_command_name(self, monkeypatch, tmp_path):
+        from danmaku_analyzer.tui.app import DanmakuTUI
+        exe = tmp_path / "python"
+        exe.write_text("")
+        monkeypatch.setattr(sys, "executable", str(exe))
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert DanmakuTUI._cli_script_path() == "danmaku-analyzer"
 
 
 # ========== 问题5：consensus_ci 写入共识统计表 ==========

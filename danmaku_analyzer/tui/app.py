@@ -1,6 +1,7 @@
 """TUI 主应用 - DanmakuScope 终端交互界面（OpenCode 风格）"""
 
 import asyncio
+import os
 import re
 import sys
 import threading
@@ -573,10 +574,19 @@ class DanmakuTUI(App):
         elif mode == "single":
             self.query_one("#bvid-input", Input).focus()
 
+    @staticmethod
+    def _cli_script_path() -> str:
+        """CLI 入口绝对路径：优先当前解释器同目录的 danmaku-analyzer（新终端窗口 PATH 未必含当前环境），无则回退命令名"""
+        name = "danmaku-analyzer.exe" if sys.platform == "win32" else "danmaku-analyzer"
+        candidate = os.path.join(os.path.dirname(sys.executable), name)
+        return candidate if os.path.exists(candidate) else "danmaku-analyzer"
+
     def _open_system_terminal(self) -> None:
         """打开系统终端执行 danmaku-analyzer login（TUI 无法内嵌终端，降级为新窗口方案）"""
+        import shlex
         import subprocess
 
+        login_cmd = f"{shlex.quote(self._cli_script_path())} login"
         try:
             if sys.platform == "win32":
                 subprocess.Popen(
@@ -584,9 +594,12 @@ class DanmakuTUI(App):
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", "-a", "Terminal", "danmaku-analyzer", "login"])
+                # `open -a Terminal <参数>` 把参数当作待打开的文件，执行命令须经 AppleScript do script
+                subprocess.Popen(
+                    ["osascript", "-e", f'tell application "Terminal" to do script "{login_cmd}"']
+                )
             else:
-                subprocess.Popen(["x-terminal-emulator", "-e", "danmaku-analyzer login"])
+                subprocess.Popen(["x-terminal-emulator", "-e", login_cmd])
             self.notify(i18n.t("terminal.opened"), severity="information")
         except OSError as e:
             logger.error(f"打开系统终端失败: {e}")
