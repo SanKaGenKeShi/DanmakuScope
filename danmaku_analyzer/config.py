@@ -16,34 +16,38 @@ from .llm_config import get_llm_settings, LLMSettings, SETTINGS_MODEL_CONFIG  # 
 class Settings(BaseSettings):
     """应用配置中心，从环境变量或 .env 文件加载配置"""
 
-    MOE: float = Field(default=0.05, description="抽样误差")
-    CONFIDENCE_LEVEL: float = Field(default=0.95, description="置信水平")
+    # json_schema_extra 的 reproducible 标记为可复现 manifest 白名单：新增配置项需显式决定是否入快照，
+    # 未标记者默认排除（凭证/路径/提示词表等敏感或环境相关字段不入包）
+    MOE: float = Field(default=0.05, description="抽样误差", json_schema_extra={"reproducible": True})
+    CONFIDENCE_LEVEL: float = Field(default=0.95, description="置信水平", json_schema_extra={"reproducible": True})
 
-    ENABLE_FREQ_BASED_SAMPLING: bool = Field(default=False, description="是否按频次排序采样，默认False使用每段前N条")
-    ENABLE_BATCH_SEGMENT_ANALYSIS: bool = Field(default=False, description="段内批量推理：同段采样弹幕合并为一次 LLM 请求，请求数由段数决定（段数×3），降低请求频率")
-    TOP_N: int = Field(default=10, description="频次排序采样时取前N条弹幕")
+    ENABLE_FREQ_BASED_SAMPLING: bool = Field(default=False, description="是否按频次排序采样，默认False使用每段前N条", json_schema_extra={"reproducible": True})
+    ENABLE_BATCH_SEGMENT_ANALYSIS: bool = Field(default=False, description="段内批量推理：同段采样弹幕合并为一次 LLM 请求，请求数由段数决定（段数×3），降低请求频率", json_schema_extra={"reproducible": True})
+    TOP_N: int = Field(default=10, description="频次排序采样时取前N条弹幕", json_schema_extra={"reproducible": True})
 
-    ENABLE_SIGNIFICANCE_TESTING: bool = Field(default=False, description="是否启用单视频段间显著性检验，默认关闭，仅探索")
-    SIGNIFICANCE_ALPHA: float = Field(default=0.05, description="显著性检验的 alpha 水平")
-    ENABLE_CORPUS_STATISTICS: bool = Field(default=True, description="是否启用语料库级跨分区推断统计（KW + 逐对 MWU + Cliff's delta），样本量满足最低要求时默认开启")
+    ENABLE_SIGNIFICANCE_TESTING: bool = Field(default=False, description="是否启用单视频段间显著性检验，默认关闭，仅探索", json_schema_extra={"reproducible": True})
+    SIGNIFICANCE_ALPHA: float = Field(default=0.05, description="显著性检验的 alpha 水平", json_schema_extra={"reproducible": True})
+    ENABLE_CORPUS_STATISTICS: bool = Field(default=True, description="是否启用语料库级跨分区推断统计（KW + 逐对 MWU + Cliff's delta），样本量满足最低要求时默认开启", json_schema_extra={"reproducible": True})
 
-    CORPUS_MIN_VIDEOS_PER_PARTITION: int = Field(default=3, description="语料库比较时每分区最少视频数，少于此不参与比较")
-    CORPUS_ZONE_POLICY: Literal["hot_only", "all", "weighted"] = Field(default="hot_only", description="语料库聚合冷热区策略：hot_only 仅热区 / all 两区各保留 / weighted 按弹幕数加权合并")
-    ENABLE_TEMPORAL_GROUPING: bool = Field(default=False, description="语料库聚合时是否按发布时间分桶（历时维度）")
-    TEMPORAL_GRANULARITY: Literal["year", "quarter", "month"] = Field(default="year", description="时间分桶粒度")
+    CORPUS_MIN_VIDEOS_PER_PARTITION: int = Field(default=3, description="语料库比较时每分区最少视频数，少于此不参与比较", json_schema_extra={"reproducible": True})
+    CORPUS_ZONE_POLICY: Literal["hot_only", "all", "weighted"] = Field(default="hot_only", description="语料库聚合冷热区策略：hot_only 仅热区 / all 两区各保留 / weighted 按弹幕数加权合并", json_schema_extra={"reproducible": True})
+    ENABLE_TEMPORAL_GROUPING: bool = Field(default=False, description="语料库聚合时是否按发布时间分桶（历时维度）", json_schema_extra={"reproducible": True})
+    TEMPORAL_GRANULARITY: Literal["year", "quarter", "month"] = Field(default="year", description="时间分桶粒度", json_schema_extra={"reproducible": True})
+    VISUALIZATION_BACKEND: Literal["r", "python"] = Field(default="python", description="语料库可视化脚本后端：r 生成 R/ggplot2 脚本，python 生成 matplotlib/seaborn 脚本", json_schema_extra={"reproducible": True})
 
-    SEGMENTATION_MODE: Literal["fixed", "dynamic"] = Field(default="dynamic", description="切分模式：fixed 或 dynamic")
-    DYNAMIC_SEGMENT_METHOD: Literal["density"] = Field(default="density", description="动态切分方法：density")
-    MIN_SEGMENT_SAMPLES: int = Field(default=30, description="每个动态分段最少弹幕数")
+    SEGMENTATION_MODE: Literal["fixed", "dynamic"] = Field(default="dynamic", description="切分模式：fixed 或 dynamic", json_schema_extra={"reproducible": True})
+    DYNAMIC_SEGMENT_METHOD: Literal["density"] = Field(default="density", description="动态切分方法：density", json_schema_extra={"reproducible": True})
+    MIN_SEGMENT_SAMPLES: int = Field(default=30, description="每个动态分段最少弹幕数", json_schema_extra={"reproducible": True})
 
-    ENABLE_LLM_ANALYSIS_REPORT: bool = Field(default=True, description="是否启用LLM分析报告生成")
-    LLM_CONCURRENCY: int = Field(default=5, description="LLM 并发调用上限")
+    ENABLE_LLM_ANALYSIS_REPORT: bool = Field(default=True, description="是否启用LLM分析报告生成", json_schema_extra={"reproducible": True})
+    LLM_CONCURRENCY: int = Field(default=5, description="LLM 并发调用上限", json_schema_extra={"reproducible": True})
+    SCHEDULER_WORKERS: int = Field(default=2, description="任务调度器并发工作线程数（compare 批量视频级并行）", json_schema_extra={"reproducible": True})
 
-    ENABLE_LLM_TOKENIZER: bool = Field(default=False, description="是否启用LLM辅助分词，复用SIMPLE_LLM")
-    LLM_TOKENIZER_MIN_LENGTH: int = Field(default=20, description="触发LLM分词的最小文本长度")
+    ENABLE_LLM_TOKENIZER: bool = Field(default=False, description="是否启用LLM辅助分词，复用SIMPLE_LLM", json_schema_extra={"reproducible": True})
+    LLM_TOKENIZER_MIN_LENGTH: int = Field(default=20, description="触发LLM分词的最小文本长度", json_schema_extra={"reproducible": True})
 
-    CONTEXT_TIME_WINDOW: float = Field(default=5.0, description="微语境时间窗口（秒）")
-    MAX_CONTEXT_TOKENS: int = Field(default=200, description="微语境最大 token 数")
+    CONTEXT_TIME_WINDOW: float = Field(default=5.0, description="微语境时间窗口（秒）", json_schema_extra={"reproducible": True})
+    MAX_CONTEXT_TOKENS: int = Field(default=200, description="微语境最大 token 数", json_schema_extra={"reproducible": True})
 
     REGISTER_HINTS: dict = Field(
         default={

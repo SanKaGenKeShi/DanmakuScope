@@ -6,6 +6,7 @@ Wilson 置信区间、描述性统计、Mann-Whitney U 检验（单视频段间�
 """
 
 import itertools
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -91,6 +92,20 @@ STATISTICAL_TESTS_COLUMNS = [
 ]
 
 UNCORRECTED_P_NOTE = "未校正 p 值（未实施多重比较校正）"
+
+
+def cohen_kappa(labels_a: List, labels_b: List) -> Optional[float]:
+    """两组类别标注的 Cohen's Kappa；长度不一致/空序列/期望一致率退化时返回 None"""
+    if not labels_a or len(labels_a) != len(labels_b):
+        return None
+    n = len(labels_a)
+    counter_a, counter_b = Counter(labels_a), Counter(labels_b)
+    po = sum(a == b for a, b in zip(labels_a, labels_b)) / n
+    pe = sum((counter_a[c] / n) * (counter_b[c] / n) for c in set(counter_a) | set(counter_b))
+    if pe >= 1.0:
+        # 两路均恒定同一类别时无随机一致性基线，完全一致视为 1.0，否则不可定义
+        return 1.0 if po == 1.0 else None
+    return (po - pe) / (1 - pe)
 
 
 @dataclass

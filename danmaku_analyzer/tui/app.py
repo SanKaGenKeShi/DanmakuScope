@@ -576,7 +576,6 @@ class DanmakuTUI(App):
     def _open_system_terminal(self) -> None:
         """打开系统终端执行 danmaku-analyzer login（TUI 无法内嵌终端，降级为新窗口方案）"""
         import subprocess
-        import sys
 
         try:
             if sys.platform == "win32":
@@ -584,6 +583,8 @@ class DanmakuTUI(App):
                     ["cmd", "/c", "start", "cmd", "/k", "danmaku-analyzer login"],
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-a", "Terminal", "danmaku-analyzer", "login"])
             else:
                 subprocess.Popen(["x-terminal-emulator", "-e", "danmaku-analyzer login"])
             self.notify(i18n.t("terminal.opened"), severity="information")

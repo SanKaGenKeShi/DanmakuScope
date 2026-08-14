@@ -15,7 +15,7 @@ from unittest.mock import patch
 import danmaku_analyzer.corpus_builder as corpus_builder_module
 import danmaku_analyzer.corpus_store as corpus_store_module
 from danmaku_analyzer.corpus_store import CorpusStore
-from danmaku_analyzer.corpus_builder import CorpusBuilder
+from danmaku_analyzer.corpus_builder import SCALAR_FIELDS, CorpusBuilder, CorpusManifest
 from danmaku_analyzer.config import get_settings
 
 
@@ -347,6 +347,153 @@ class TestCorpusPackaging:
         with zipfile.ZipFile(result.zip_path, 'r') as zipf:
             assert "corpus_analysis_report.md" in zipf.namelist()
             assert zipf.read("corpus_analysis_report.md").decode('utf-8') == "# 报告正文"
+
+
+class TestCorpusManifest:
+
+    def _valid_meta(self):
+        return {
+            "generated_at": "2026-08-14T12:00:00", "pipeline_version": "0.3.4-beta",
+            "zone_policy": "hot_only", "temporal_grouping": False,
+            "temporal_granularity": "year", "video_count": 2,
+            "bvids": ["BV1a", "BV1b"], "prompt_versions": ["v2.3.0"], "warnings": [],
+        }
+
+    def test_valid_meta_passes(self):
+        manifest = CorpusManifest.model_validate(self._valid_meta())
+        assert manifest.video_count == 2
+
+    def test_invalid_zone_policy_rejected(self):
+        from pydantic import ValidationError
+        meta = self._valid_meta()
+        meta["zone_policy"] = "unknown_policy"
+        with pytest.raises(ValidationError):
+            CorpusManifest.model_validate(meta)
+
+    def test_video_count_mismatch_rejected(self):
+        from pydantic import ValidationError
+        meta = self._valid_meta()
+        meta["video_count"] = 3
+        with pytest.raises(ValidationError):
+            CorpusManifest.model_validate(meta)
+
+    def test_missing_field_rejected(self):
+        from pydantic import ValidationError
+        meta = self._valid_meta()
+        del meta["pipeline_version"]
+        with pytest.raises(ValidationError):
+            CorpusManifest.model_validate(meta)
+
+    def test_snapshot_metadata_matches_schema(self, tmp_path, tmp_store):
+        """build_snapshot_metadata 产出必须直接通过 schema 校验"""
+        make_fake_zip(tmp_path, "BV1s1", "游戏")
+        builder = CorpusBuilder()
+        result = builder.build_from_zips([str(next(tmp_path.glob("*.zip")))],
+                                          output_dir=str(tmp_path / "out"))
+        CorpusManifest.model_validate(builder.build_snapshot_metadata(result))
+
+    def test_package_snapshot_raises_on_invalid_manifest(self, tmp_path, tmp_store, monkeypatch):
+        from pydantic import ValidationError
+        make_fake_zip(tmp_path, "BV1s2", "游戏")
+        builder = CorpusBuilder()
+        result = builder.build_from_zips([str(next(tmp_path.glob("*.zip")))],
+                                          output_dir=str(tmp_path / "out"))
+        bad_meta = builder.build_snapshot_metadata(result)
+        bad_meta["zone_policy"] = "bogus"
+        monkeypatch.setattr(builder, "build_snapshot_metadata", lambda r: bad_meta)
+        with pytest.raises(ValidationError):
+            builder.package_snapshot(result)
+        assert not result.zip_valid
+
+
+# ========== 语料库快照 diff 与索引时间戳快照 ==========
+
+class TestCorpusDiff:
+
+    @staticmethod
+    def _row(bvid: str, density: float = 0.5, danmaku: int = 100, tname: str = "游戏") -> dict:
+        row = {"bvid": bvid, "tname": tname, "pubdate": "2025-01-01T00:00:00",
+               "prompt_version": "v2.3.0", "zone_type": "", "danmaku_count": danmaku}
+        for name in SCALAR_FIELDS:
+            row[name] = 0.5
+        row["content_word_density"] = density
+        return row
+
+    @staticmethod
+    def _write_csv(path, rows) -> str:
+        pd.DataFrame(rows).to_csv(path, index=False, encoding='utf-8-sig')
+        return str(path)
+
+    def test_added_removed_changed(self, tmp_path):
+        builder = CorpusBuilder()
+        a = self._write_csv(tmp_path / "a.csv", [self._row("BV1a"), self._row("BV1b", density=0.4)])
+        b = self._write_csv(tmp_path / "b.csv", [self._row("BV1b", density=0.7), self._row("BV1c")])
+        report = builder.diff(a, b)
+        assert [r["bvid"] for r in report.added] == ["BV1c"]
+        assert [r["bvid"] for r in report.removed] == ["BV1a"]
+        assert [r["bvid"] for r in report.changed] == ["BV1b"]
+        delta = report.changed[0]["fields"]["content_word_density"]
+        assert delta["old"] == pytest.approx(0.4)
+        assert delta["new"] == pytest.approx(0.7)
+
+    def test_identical_snapshots_no_diff(self, tmp_path):
+        builder = CorpusBuilder()
+        a = self._write_csv(tmp_path / "a.csv", [self._row("BV1a")])
+        b = self._write_csv(tmp_path / "b.csv", [self._row("BV1a")])
+        report = builder.diff(a, b)
+        assert not report.added and not report.removed and not report.changed
+        assert report.to_dataframe().empty
+
+    def test_float_tolerance_ignores_readback_noise(self, tmp_path):
+        builder = CorpusBuilder()
+        a = self._write_csv(tmp_path / "a.csv", [self._row("BV1a", density=0.5)])
+        b = self._write_csv(tmp_path / "b.csv", [self._row("BV1a", density=0.5 + 1e-12)])
+        report = builder.diff(a, b)
+        assert not report.changed
+
+    def test_snapshot_zip_consumed(self, tmp_path):
+        csv_path = self._write_csv(tmp_path / "corpus_videos.csv", [self._row("BV1z")])
+        zip_path = str(tmp_path / "snapshot.zip")
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
+            zipf.write(csv_path, "corpus_videos.csv")
+        builder = CorpusBuilder()
+        report = builder.diff(zip_path, csv_path)
+        assert not report.added and not report.removed and not report.changed
+
+    def test_zip_without_videos_csv_raises(self, tmp_path):
+        zip_path = str(tmp_path / "bad.zip")
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
+            zipf.writestr("other.txt", "x")
+        with pytest.raises(ValueError):
+            CorpusBuilder().diff(zip_path, zip_path)
+
+    def test_to_dataframe_change_rows(self, tmp_path):
+        builder = CorpusBuilder()
+        a = self._write_csv(tmp_path / "a.csv", [self._row("BV1b", density=0.4)])
+        b = self._write_csv(tmp_path / "b.csv", [self._row("BV1b", density=0.7), self._row("BV1c")])
+        df = builder.diff(a, b).to_dataframe()
+        assert {"bvid", "change_type", "field", "old_value", "new_value"} <= set(df.columns)
+        assert "added" in set(df["change_type"])
+        assert "changed" in set(df["change_type"])
+
+
+class TestIndexAsOf:
+
+    def test_as_of_filters_by_analyzed_at(self, tmp_path):
+        store = CorpusStore(index_path=str(tmp_path / "idx.json"))
+        store.register_video({"bvid": "BV1old", "analyzed_at": "2026-01-01T00:00:00"})
+        store.register_video({"bvid": "BV1new", "analyzed_at": "2026-08-01T00:00:00"})
+        assert len(store.get_videos()) == 2
+        snapshot = store.get_videos(as_of="2026-06-01T00:00:00")
+        assert [v["bvid"] for v in snapshot] == ["BV1old"]
+
+    def test_entry_without_analyzed_at_excluded_from_snapshot_view(self, tmp_path):
+        store = CorpusStore(index_path=str(tmp_path / "idx.json"))
+        index = store.load()
+        index["videos"].append({"bvid": "BV1no_ts"})
+        store.save(index)
+        assert store.get_videos(as_of="2026-01-01T00:00:00") == []
+        assert len(store.get_videos()) == 1
 
 
 class TestCorpusReportPrompt:

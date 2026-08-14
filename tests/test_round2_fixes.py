@@ -19,7 +19,7 @@ from danmaku_analyzer.llm_models import ConsensusLevel
 from danmaku_analyzer.pipeline import _stage_aggregate
 
 from test_core_modules import make_danmaku_record
-from test_fixes import _FakeAsyncClient
+from test_fixes import _FakeBackend
 
 
 # ========== #1：共识 CI 基数与共识率基数一致（LLM 记录数） ==========
@@ -114,31 +114,23 @@ class TestMultiDimMerge:
 
 # ========== #4：LLM 分词批量并发（信号量限速）+ 单条失败回退 jieba ==========
 
-class _CountingAsyncClient(_FakeAsyncClient):
+class _CountingBackend(_FakeBackend):
     def __init__(self, payload):
         super().__init__([payload])
         self.create_calls = 0
-        inner_create = self.chat.completions.create
+        inner_complete = self.complete
 
-        async def counting_create(**kwargs):
+        async def counting_complete(**kwargs):
             self.create_calls += 1
-            self.chat.completions.payloads.append(self.chat.completions.payloads[0])
-            return await inner_create(**kwargs)
+            self.payloads.append(self.payloads[0])
+            return await inner_complete(**kwargs)
 
-        self.chat.completions.create = counting_create
+        self.complete = counting_complete
 
 
-class _RaisingCompletions:
-    async def create(self, **kwargs):
+class _RaisingBackend:
+    async def complete(self, **kwargs):
         raise RuntimeError("接口故障")
-
-
-class _RaisingChat:
-    completions = _RaisingCompletions()
-
-
-class _RaisingAsyncClient:
-    chat = _RaisingChat()
 
 
 def _make_llm_tokenizer_analyzer(client):
@@ -156,7 +148,7 @@ class TestBatchLLMTokenize:
 
     def test_long_texts_all_sent_to_llm(self):
         analyzer = _make_llm_tokenizer_analyzer(
-            _CountingAsyncClient(json.dumps([["你好", "noun"]]))
+            _CountingBackend(json.dumps([["你好", "noun"]]))
         )
         long_texts = ["这是一条足够长的弹幕文本", "另一条同样足够长的弹幕", "第三条也足够长的弹幕啊"]
         result = asyncio.run(analyzer.analyze_async(long_texts + ["短"]))
@@ -165,7 +157,7 @@ class TestBatchLLMTokenize:
         assert result.total_word_count > 0
 
     def test_llm_failure_falls_back_to_jieba(self):
-        analyzer = _make_llm_tokenizer_analyzer(_RaisingAsyncClient())
+        analyzer = _make_llm_tokenizer_analyzer(_RaisingBackend())
         result = asyncio.run(analyzer.analyze_async(["这是一条足够长的弹幕文本", "短"]))
         assert result.total_danmaku_count == 2
         assert result.total_word_count > 0

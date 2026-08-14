@@ -2,7 +2,7 @@
 
 B 站弹幕社会语言学分析工具（命令行 + 终端图形界面）。采集弹幕及视频元数据，经硬统计与 LLM 软标签双通道分析后，按官方分区（tname）聚合输出交叉统计表，为社会语言学/语料库语言学实证研究提供可溯源、可复核的语料数据。
 
-当前版本：**v0.3.3-beta**
+当前版本：**v0.3.4-beta**
 
 ---
 
@@ -17,7 +17,9 @@ B 站弹幕社会语言学分析工具（命令行 + 终端图形界面）。采
 | 统计推断 | Wilson 置信区间 + 样本量校验，可选单视频段间 Mann-Whitney U（默认关闭）                   |
 | 分析报告 | 可选调用 LLM 生成社会语言学语料分析报告                                                           |
 | 产出打包 | 全部产出自动打包为 `[BV号]视频标题.zip`                                                           |
-| 语料库比较 | 跨视频语料库级聚合 + KW/Mann-Whitney U/Cliff's delta 推断统计 + 分区缺口补足建议 + R 可视化 |
+| 语料库比较 | 跨视频语料库级聚合 + KW/Mann-Whitney U/Cliff's delta 推断统计 + 分区缺口补足建议 + R/Python 双后端可视化 |
+| 学术产出 | 方法论描述自动生成（methodology.md）+ LaTeX 表格片段 / APA 统计文本导出 |
+| 规模化与可复现 | 任务队列调度（中断无损恢复）+ 语料库快照 diff + YAML 批量脚本 + 可复现 manifest |
 | TUI 界面 | Textual 终端图形界面：个体分析/比对分析双模式、设置中心（含参数说明与 LLM 连接检测）、设置持久化 |
 
 ---
@@ -47,6 +49,7 @@ pip install .
 ```bash
 uv sync                 # 运行环境（含项目本体）
 uv sync --extra dev     # 开发环境（pytest/ruff 等）
+uv sync --extra viz     # 含 Python 可视化依赖（matplotlib/seaborn）
 ```
 
 ---
@@ -124,8 +127,18 @@ danmaku-analyzer compare BV1xx411c7mD --no-reuse
 # 断点续传：从进度文件跳过已完成视频
 danmaku-analyzer compare BV1xx411c7mD BV1yy411c7mE --resume
 
-# 语料库级聚合（回读单视频 ZIP，可选 --from-index 从索引聚合 / --with-r 生成 R 脚本）
-danmaku-analyzer corpus "[BV1xx]标题.zip" "[BV1yy]标题.zip" --with-r
+# 语料库级聚合（回读单视频 ZIP，可选 --from-index 从索引聚合 / --with-plots 生成可视化脚本）
+danmaku-analyzer corpus "[BV1xx]标题.zip" "[BV1yy]标题.zip" --with-plots
+
+# 多格式导出（报告 ZIP 或聚合 CSV → LaTeX 表格片段 / APA 统计文本）
+danmaku-analyzer export "[BV1xx]标题.zip" --format latex
+danmaku-analyzer export "[corpus]_3videos_xxx.zip" --format apa
+
+# 语料库快照对比（视频级新增/移除/变更，支撑历时研究）
+danmaku-analyzer diff "[corpus]_3videos_旧.zip" "[corpus]_5videos_新.zip"
+
+# 批量脚本模式（YAML 任务文件定义 analyze/batch/compare 任务集）
+danmaku-analyzer script tasks.yaml
 
 # 语料库补足建议（分区缺口 + 在线候选视频；--gaps-only 仅离线缺口）
 danmaku-analyzer suggest 游戏 音乐 --per-partition 5
@@ -154,7 +167,9 @@ danmaku-tui
 ├── table_consensus_stats.csv           # 共识水平统计
 ├── heatmap_data.json                   # 热力图数据
 ├── kappa_ready.csv                     # 编码员间一致性复核用
-├── metadata.json                       # 元数据
+├── metadata.json                       # 元数据（含双路 Kappa 质控指标）
+├── methodology.md                      # 方法论描述（可直接引用）
+├── repro_manifest.json                 # 可复现环境快照（依赖版本/白名单配置，无敏感字段）
 └── sociolinguistic_analysis_report.md  # LLM 分析报告（可选）
 ```
 
@@ -185,11 +200,15 @@ danmaku_analyzer/
 ├── aggregator.py           # 嵌套聚合（分区/热区）
 ├── statistical_validator.py # 统计推断（Wilson CI + 语料库级 KW/MWU/Cliff's delta）
 ├── reporter.py             # 报告导出 + ZIP 打包
+├── methodology.py          # 方法论描述生成（methodology.md）
+├── exporter.py             # 多格式导出（LaTeX/APA）
+├── reproducibility.py      # 可复现 manifest（运行环境快照）
 ├── cache_manager.py        # 缓存管理（Pickle, 12h TTL）
 ├── corpus_store.py         # 语料库索引（corpus_index.json）
-├── corpus_builder.py       # 语料库级聚合（ZIP 回读 + 跨视频比较表）
+├── corpus_builder.py       # 语料库级聚合（ZIP 回读 + 跨视频比较表 + manifest 校验）
 ├── corpus_suggester.py     # 语料库补足建议（缺口分析 + 候选推荐）
-├── corpus_visualizer.py    # R/ggplot2 可视化脚本模板
+├── corpus_visualizer.py    # 可视化脚本模板（R/ggplot2 与 matplotlib/seaborn 双后端）
+├── scheduler/              # 任务调度子包（asyncio.Queue + 状态持久化，中断无损恢复）
 ├── tui/                    # TUI 子包（Textual：主应用/文案与偏好/设置中心）
 ├── utils/                  # 工具子包（日志/解析器/Token 计数）
 └── lexicon/                # 自定义词典 + 报告规范
@@ -210,6 +229,8 @@ tests/
 - **统计**：scipy, numpy, ruptures
 - **爬虫**：bilibili-api-python, httpx, qrcode（扫码登录）
 - **数据处理**：pandas
+- **任务文件**：pyyaml（批量脚本模式）
+- **可视化**（可选 viz 组）：matplotlib, seaborn
 - **日志**：loguru
 - **测试**：pytest
 

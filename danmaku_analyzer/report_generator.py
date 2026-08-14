@@ -12,7 +12,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .config import get_settings
 from .llm_config import get_llm_settings
-from .llm_factory import analysis_report_async_client
+from .llm_factory import analysis_report_backend
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -29,7 +29,7 @@ class AnalysisReportGenerator:
         """初始化报告生成器（使用 ANALYSIS_REPORT_LLM 独立配置）"""
         llm_cfg = get_llm_settings()
 
-        self.client = analysis_report_async_client(timeout=llm_cfg.ANALYSIS_REPORT_LLM_TIMEOUT)
+        self.client = analysis_report_backend(timeout=llm_cfg.ANALYSIS_REPORT_LLM_TIMEOUT)
         self.model = llm_cfg.ANALYSIS_REPORT_LLM_MODEL
         self.temperature = llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE
         self.enable_thinking = llm_cfg.ANALYSIS_REPORT_LLM_ENABLE_THINKING
@@ -143,7 +143,7 @@ class AnalysisReportGenerator:
     async def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
         """单次 API 调用（含重试）；空内容与瞬时故障抛错触发 tenacity 重试"""
         async with self.llm_semaphore:
-            response = await self.client.chat.completions.create(
+            report_content = await self.client.complete(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -155,7 +155,6 @@ class AnalysisReportGenerator:
                     "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
                 },
             )
-        report_content = response.choices[0].message.content
         if not report_content:
             raise ValueError("模型返回内容为空")
         return report_content

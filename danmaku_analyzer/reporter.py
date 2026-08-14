@@ -124,6 +124,18 @@ class Reporter:
             "corpus_analysis_report.md", "语料库LLM分析报告"
         )
     
+    def generate_methodology(self, metadata: Dict, sampling: Optional[Dict] = None) -> str:
+        """方法论描述（methodology.md）随报告入包，渲染委派 MethodologyGenerator"""
+        from .methodology import MethodologyGenerator
+
+        return MethodologyGenerator(self.output_dir).write(metadata, sampling)
+
+    def export_formatted(self, source_path: str, fmt: str) -> str:
+        """多格式导出（latex/apa），格式化逻辑委派 Exporter"""
+        from .exporter import Exporter
+
+        return Exporter().export(source_path, fmt, self.output_dir)
+
     def _write_dataframe(self, rows: List[Dict], filename: str, description: str) -> str:
         df = pd.DataFrame(rows)
         filepath = os.path.join(self.output_dir, filename)

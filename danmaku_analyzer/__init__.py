@@ -26,11 +26,16 @@ if TYPE_CHECKING:
     from .aggregator import Aggregator, AggregatedData, DanmakuRecord
     from .reporter import Reporter
     from .report_generator import AnalysisReportGenerator
+    from .methodology import MethodologyGenerator
+    from .exporter import Exporter
     from .cache_manager import CacheManager, get_cache_manager
     from .corpus_store import CorpusStore
-    from .corpus_builder import CorpusBuilder
+    from .corpus_builder import CorpusBuilder, CorpusManifest, DiffReport
     from .corpus_suggester import CorpusSuggester
     from .corpus_visualizer import CorpusVisualizer
+    from .scheduler import TaskScheduler, ScheduledTask
+    from .reproducibility import build_repro_manifest
+    from .llm_factory import LLMBackend, OpenAICompatibleBackend, OllamaBackend
 
 try:
     __version__ = _pkg_version("danmaku-analyzer")
@@ -60,8 +65,12 @@ __all__ = [
     "SentenceFunctionOutput", "OrthographyOutput",
     "Aggregator", "AggregatedData", "DanmakuRecord",
     "Reporter", "AnalysisReportGenerator",
+    "MethodologyGenerator", "Exporter",
     "CacheManager", "get_cache_manager",
-    "CorpusStore", "CorpusBuilder", "CorpusSuggester", "CorpusVisualizer",
+    "CorpusStore", "CorpusBuilder", "CorpusManifest", "DiffReport", "CorpusSuggester", "CorpusVisualizer",
+    "TaskScheduler", "ScheduledTask",
+    "build_repro_manifest",
+    "LLMBackend", "OpenAICompatibleBackend", "OllamaBackend",
 ]
 
 # 符号 → 所在子模块（PEP 562 懒加载：首次访问才导入，避免仅读版本号时拉起全部重型依赖）
@@ -84,11 +93,16 @@ _LAZY_EXPORTS = {
     "Aggregator": ".aggregator", "AggregatedData": ".aggregator", "DanmakuRecord": ".aggregator",
     "Reporter": ".reporter",
     "AnalysisReportGenerator": ".report_generator",
+    "MethodologyGenerator": ".methodology",
+    "Exporter": ".exporter",
     "CacheManager": ".cache_manager", "get_cache_manager": ".cache_manager",
     "CorpusStore": ".corpus_store",
-    "CorpusBuilder": ".corpus_builder",
+    "CorpusBuilder": ".corpus_builder", "CorpusManifest": ".corpus_builder", "DiffReport": ".corpus_builder",
     "CorpusSuggester": ".corpus_suggester",
     "CorpusVisualizer": ".corpus_visualizer",
+    "TaskScheduler": ".scheduler", "ScheduledTask": ".scheduler",
+    "build_repro_manifest": ".reproducibility",
+    "LLMBackend": ".llm_factory", "OpenAICompatibleBackend": ".llm_factory", "OllamaBackend": ".llm_factory",
 }
 
 

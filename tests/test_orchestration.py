@@ -157,30 +157,17 @@ class TestApplySavedPrefsValidation:
         assert settings.TOP_N == 25
 
 
-class _FakeCompletions:
+class _FakeClient:
+    """假 LLM 后端：complete 返回 payload 的 JSON 字符串，error 非空则抛错"""
+
     def __init__(self, payload=None, error=None):
         self._payload = payload
         self._error = error
 
-    async def create(self, **kwargs):
+    async def complete(self, **kwargs):
         if self._error is not None:
             raise self._error
-
-        class _Message:
-            content = json.dumps(self._payload)
-
-        class _Choice:
-            message = _Message()
-
-        class _Response:
-            choices = [_Choice()]
-
-        return _Response()
-
-
-class _FakeClient:
-    def __init__(self, payload=None, error=None):
-        self.chat = type("Chat", (), {"completions": _FakeCompletions(payload, error)})()
+        return json.dumps(self._payload)
 
 
 def _components():

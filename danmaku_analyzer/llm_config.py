@@ -71,19 +71,23 @@ class LLMSettings(BaseSettings):
     )
     COMPLEX_LLM_MODEL: str = Field(
         default="gpt-4o-mini", 
-        description="复杂任务 LLM 模型"
+        description="复杂任务 LLM 模型",
+        json_schema_extra={"reproducible": True}
     )
     COMPLEX_LLM_TEMPERATURES: List[float] = Field(
         default=[0.1, 0.4], 
-        description="复杂任务双路温度"
+        description="复杂任务双路温度",
+        json_schema_extra={"reproducible": True}
     )
     COMPLEX_LLM_ENABLE_THINKING: bool = Field(
         default=False,
-        description="复杂任务 LLM 是否启用思考模式（独立配置）"
+        description="复杂任务 LLM 是否启用思考模式（独立配置）",
+        json_schema_extra={"reproducible": True}
     )
     COMPLEX_LLM_TIMEOUT: float = Field(
         default=120.0,
-        description="复杂任务 LLM 请求超时（秒）"
+        description="复杂任务 LLM 请求超时（秒）",
+        json_schema_extra={"reproducible": True}
     )
     
     # 简单句类任务（sentence_function）
@@ -97,19 +101,23 @@ class LLMSettings(BaseSettings):
     )
     SIMPLE_LLM_MODEL: str = Field(
         default="deepseek-chat", 
-        description="简单任务 LLM 模型"
+        description="简单任务 LLM 模型",
+        json_schema_extra={"reproducible": True}
     )
     SIMPLE_LLM_TEMPERATURE: float = Field(
         default=0.0, 
-        description="简单任务温度（单路，确定性）"
+        description="简单任务温度（单路，确定性）",
+        json_schema_extra={"reproducible": True}
     )
     SIMPLE_LLM_ENABLE_THINKING: bool = Field(
         default=False,
-        description="简单任务 LLM 是否启用思考模式（独立配置）"
+        description="简单任务 LLM 是否启用思考模式（独立配置）",
+        json_schema_extra={"reproducible": True}
     )
     SIMPLE_LLM_TIMEOUT: float = Field(
         default=120.0,
-        description="简单任务 LLM 请求超时（秒）"
+        description="简单任务 LLM 请求超时（秒）",
+        json_schema_extra={"reproducible": True}
     )
     
     # 分析报告生成任务，独立配置（不再留空复用 COMPLEX_LLM；占位值表示未配置）
@@ -123,41 +131,50 @@ class LLMSettings(BaseSettings):
     )
     ANALYSIS_REPORT_LLM_MODEL: str = Field(
         default="gpt-4o-mini", 
-        description="分析报告 LLM 模型（独立配置，需自行填写）"
+        description="分析报告 LLM 模型（独立配置，需自行填写）",
+        json_schema_extra={"reproducible": True}
     )
     ANALYSIS_REPORT_LLM_TEMPERATURE: float = Field(
         default=0.3, 
-        description="分析报告 LLM 温度"
+        description="分析报告 LLM 温度",
+        json_schema_extra={"reproducible": True}
     )
     ANALYSIS_REPORT_LLM_ENABLE_THINKING: bool = Field(
         default=False,
-        description="分析报告 LLM 是否启用思考模式（独立配置）"
+        description="分析报告 LLM 是否启用思考模式（独立配置）",
+        json_schema_extra={"reproducible": True}
     )
     ANALYSIS_REPORT_LLM_TIMEOUT: float = Field(
         default=180.0,
-        description="分析报告 LLM 请求超时（秒，报告生成耗时长，默认高于分析任务）"
+        description="分析报告 LLM 请求超时（秒，报告生成耗时长，默认高于分析任务）",
+        json_schema_extra={"reproducible": True}
     )
     
     ENABLE_DUAL_PATH: bool = Field(
         default=True, 
-        description="是否启用双路推理"
+        description="是否启用双路推理",
+        json_schema_extra={"reproducible": True}
     )
     JSD_THRESHOLD_LOW: float = Field(
         default=0.2, 
-        description="JSD 低阈值（归一化后相对散度，1.0=完全分歧）"
+        description="JSD 低阈值（归一化后相对散度，1.0=完全分歧）",
+        json_schema_extra={"reproducible": True}
     )
     JSD_THRESHOLD_MEDIUM: float = Field(
         default=0.6, 
-        description="JSD 中阈值（归一化后相对散度，1.0=完全分歧）"
+        description="JSD 中阈值（归一化后相对散度，1.0=完全分歧）",
+        json_schema_extra={"reproducible": True}
     )
     LOW_CONSENSUS_WEIGHT: float = Field(
         default=0.2, 
-        description="低共识权重"
+        description="低共识权重",
+        json_schema_extra={"reproducible": True}
     )
     
     PROMPT_VERSION: str = Field(
         default="v2.3.0", 
-        description="Prompt 版本"
+        description="Prompt 版本",
+        json_schema_extra={"reproducible": True}
     )
     
     model_config = SETTINGS_MODEL_CONFIG

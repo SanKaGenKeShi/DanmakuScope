@@ -5,7 +5,7 @@ CLI 入口模块 - 命令行界面
 import asyncio
 import os
 import sys
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import click
 from rich.console import Console
@@ -161,14 +161,128 @@ async def _batch_async(
         sys.exit(1)
 
 
+# 脚本任务选项白名单（未知键报错，避免拼写错误静默失效）
+_SCRIPT_OPTION_KEYS = {
+    "analyze": {"output", "credential", "freq_based", "top_n", "no_cache"},
+    "batch": {"output", "credential", "freq_based", "top_n", "no_cache"},
+    "compare": {"output", "reuse", "resume"},
+}
+
+
+def _parse_script_tasks(task_file: str) -> List[Dict]:
+    """YAML 任务文件解析与结构校验；仅 safe_load 防任意代码执行"""
+    import yaml
+
+    with open(task_file, encoding='utf-8') as f:
+        document = yaml.safe_load(f)
+    if not isinstance(document, dict) or not isinstance(document.get("tasks"), list) or not document["tasks"]:
+        raise ValueError("任务文件须包含非空 tasks 列表")
+
+    tasks = []
+    for idx, task in enumerate(document["tasks"], start=1):
+        if not isinstance(task, dict):
+            raise ValueError(f"第 {idx} 个任务须为映射")
+        command = task.get("command")
+        if command not in _SCRIPT_OPTION_KEYS:
+            raise ValueError(f"第 {idx} 个任务不支持的命令: {command}（可选 analyze/batch/compare）")
+        options = task.get("options") or {}
+        if not isinstance(options, dict):
+            raise ValueError(f"第 {idx} 个任务的 options 须为映射")
+        unknown = set(options) - _SCRIPT_OPTION_KEYS[command]
+        if unknown:
+            raise ValueError(f"第 {idx} 个任务含未知选项: {sorted(unknown)}")
+        if command == "analyze":
+            if not task.get("input"):
+                raise ValueError(f"第 {idx} 个任务（analyze）缺少 input")
+        elif command in ("batch", "compare"):
+            inputs = task.get("inputs")
+            if not isinstance(inputs, list) or not inputs:
+                raise ValueError(f"第 {idx} 个任务（{command}）缺少非空 inputs 列表")
+        tasks.append({"command": command, "input": task.get("input", ""),
+                      "inputs": task.get("inputs") or [], "options": options})
+    return tasks
+
+
+@cli.command()
+@click.argument('task_file')
+def script(task_file: str):
+    """批量脚本模式：按 YAML 任务文件顺序执行 analyze/batch/compare 任务集，单项失败不中断后续"""
+    if not os.path.exists(task_file):
+        console.print(f"[red]任务文件不存在: {task_file}[/red]")
+        sys.exit(1)
+    try:
+        tasks = _parse_script_tasks(task_file)
+    except Exception as e:
+        console.print(f"[red]任务文件解析失败: {e}[/red]")
+        sys.exit(1)
+    try:
+        asyncio.run(_run_script_async(tasks))
+    except Exception as e:
+        console.print(f"[red]脚本执行失败: {e}[/red]")
+        logger.error(f"脚本执行失败: {e}", exc_info=True)
+        sys.exit(1)
+
+
+async def _run_script_async(tasks: List[Dict]):
+    """逐任务执行并汇总；_compare_async/_batch_async 以 sys.exit 表达失败，此处捕获转为任务状态"""
+    results = []
+    for idx, task in enumerate(tasks, start=1):
+        command, options = task["command"], task["options"]
+        console.print(f"\n[bold blue]脚本任务 {idx}/{len(tasks)}: {command}[/bold blue]")
+        try:
+            if command == "analyze":
+                await _analyze_async(
+                    task["input"], options.get("output"), options.get("credential"),
+                    options.get("freq_based", False), options.get("top_n"),
+                    options.get("no_cache", False),
+                )
+            elif command == "batch":
+                fail_count = 0
+                for input_str in task["inputs"]:
+                    try:
+                        await _analyze_async(
+                            input_str, options.get("output"), options.get("credential"),
+                            options.get("freq_based", False), options.get("top_n"),
+                            options.get("no_cache", False),
+                        )
+                    except Exception as e:
+                        fail_count += 1
+                        console.print(f"[red]分析失败: {input_str} - {e}[/red]")
+                if fail_count:
+                    raise RuntimeError(f"{fail_count}/{len(task['inputs'])} 个视频分析失败")
+            else:
+                await _compare_async(
+                    list(task["inputs"]), options.get("output"),
+                    options.get("reuse", True), options.get("resume", False),
+                )
+            results.append((idx, command, True, ""))
+        except SystemExit as e:
+            ok = e.code in (0, None)
+            results.append((idx, command, ok, "" if ok else f"退出码 {e.code}"))
+        except Exception as e:
+            results.append((idx, command, False, str(e)))
+
+    table = Table(title="脚本任务汇总")
+    table.add_column("#", justify="right")
+    table.add_column("命令")
+    table.add_column("状态")
+    table.add_column("备注", max_width=40, overflow="ellipsis")
+    for idx, command, ok, note in results:
+        table.add_row(str(idx), command, "[green]成功[/green]" if ok else "[red]失败[/red]", note)
+    console.print(table)
+    if any(not ok for _, _, ok, _ in results):
+        sys.exit(1)
+
+
 @cli.command()
 @click.argument('zip_list', nargs=-1)
 @click.option('--output', '-o', default=None, help='语料库聚合表输出目录')
 @click.option('--from-index', is_flag=True, default=False, help='从语料库索引登记的全部视频聚合（无需列出 ZIP）')
-@click.option('--with-r', is_flag=True, default=False, help='同时生成 R 可视化脚本模板（corpus_plots.R）')
-def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_r: bool):
+@click.option('--with-plots', '--with-r', 'with_plots', is_flag=True, default=False, help='同时生成可视化脚本（后端由 VISUALIZATION_BACKEND 配置：python 生成 matplotlib/seaborn 脚本，r 生成 R 脚本）')
+def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_plots: bool):
     """跨视频语料库级聚合（回读单视频 ZIP 报告，按分区输出比较表并打包快照）"""
     from .corpus_builder import CorpusBuilder
+    from .reproducibility import write_repro_manifest
 
     if not from_index and not zip_list:
         console.print("[red]请提供至少一个 ZIP 文件，或使用 --from-index 从语料库索引聚合[/red]")
@@ -183,13 +297,17 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_r: boo
         console.print(f"[bold green]语料库聚合完成[/bold green]")
         console.print(f"  聚合表: {result.csv_path}")
 
-        extra_files = []
-        if with_r:
+        extra_files = [write_repro_manifest(result.output_dir)]
+        if with_plots:
             from .corpus_visualizer import CorpusVisualizer
-            r_path = CorpusVisualizer().write_r_script(result.output_dir)
-            extra_files.append(r_path)
-            console.print(f"  R 可视化脚本: {r_path}")
-            console.print(f"  [dim]运行: Rscript {os.path.basename(r_path)}（需安装 R 与 ggplot2/dplyr/tidyr）[/dim]")
+            script_path = CorpusVisualizer().write_script(result.output_dir)
+            extra_files.append(script_path)
+            if script_path.endswith('.R'):
+                console.print(f"  R 可视化脚本: {script_path}")
+                console.print(f"  [dim]运行: Rscript {os.path.basename(script_path)}（需安装 R 与 ggplot2/dplyr/tidyr）[/dim]")
+            else:
+                console.print(f"  Python 可视化脚本: {script_path}")
+                console.print(f"  [dim]运行: python {os.path.basename(script_path)}（需 pip install \"danmaku-analyzer[viz]\"）[/dim]")
 
         if get_settings().ENABLE_LLM_ANALYSIS_REPORT:
             report_path = asyncio.run(_generate_corpus_llm_report(builder, result))
@@ -219,6 +337,26 @@ async def _generate_corpus_llm_report(builder, result) -> Optional[str]:
     return await Reporter(output_dir=result.output_dir).generate_corpus_analysis_report(
         result.csv_path, result.videos_csv_path, corpus_metadata
     )
+
+
+@cli.command()
+@click.argument('source_path')
+@click.option('--format', '-f', 'fmt', type=click.Choice(['latex', 'apa'], case_sensitive=False), required=True, help='导出格式：latex 表格片段 / apa 统计报告文本')
+@click.option('--output', '-o', default=None, help='导出文件输出目录（默认当前目录）')
+def export(source_path: str, fmt: str, output: Optional[str]):
+    """多格式导出：报告 ZIP 或聚合 CSV → LaTeX 表格片段 / APA 格式统计文本"""
+    from .exporter import Exporter
+
+    if not os.path.exists(source_path):
+        console.print(f"[red]输入文件不存在: {source_path}[/red]")
+        sys.exit(1)
+    try:
+        out_path = Exporter().export(source_path, fmt, output)
+        console.print(f"[bold green]{fmt.upper()} 导出完成[/bold green]: {out_path}")
+    except Exception as e:
+        console.print(f"[red]导出失败: {e}[/red]")
+        logger.error(f"导出失败: {e}", exc_info=True)
+        sys.exit(1)
 
 
 @cli.command()
@@ -281,6 +419,50 @@ async def _compare_async(input_list: List[str], output: Optional[str], reuse: bo
         console.print(f"[red]比对分析完成，{fail_count}/{len(result.items)} 个失败[/red]")
         sys.exit(1)
     console.print("[bold green]比对分析完成[/bold green]")
+
+
+@cli.command()
+@click.argument('snapshot_a')
+@click.argument('snapshot_b')
+@click.option('--output', '-o', default=None, help='diff 表输出目录（默认为快照 B 所在目录）')
+def diff(snapshot_a: str, snapshot_b: str, output: Optional[str]):
+    """语料库快照对比：两份快照 ZIP 或 corpus_videos.csv 的视频级新增/移除/变更"""
+    from .corpus_builder import CorpusBuilder
+
+    for path in (snapshot_a, snapshot_b):
+        if not os.path.exists(path):
+            console.print(f"[red]快照不存在: {path}[/red]")
+            sys.exit(1)
+    try:
+        report = CorpusBuilder().diff(snapshot_a, snapshot_b)
+    except Exception as e:
+        console.print(f"[red]快照对比失败: {e}[/red]")
+        logger.error(f"快照对比失败: {e}", exc_info=True)
+        sys.exit(1)
+
+    console.print(f"[bold green]快照对比完成[/bold green]  新增 {len(report.added)} / 移除 {len(report.removed)} / 变更 {len(report.changed)}")
+    df = report.to_dataframe()
+    if df.empty:
+        console.print("[dim]两份快照无差异[/dim]")
+        return
+    table = Table(title="快照差异明细")
+    table.add_column("BV号", style="cyan")
+    table.add_column("类型")
+    table.add_column("字段")
+    table.add_column("旧值", max_width=24, overflow="ellipsis")
+    table.add_column("新值", max_width=24, overflow="ellipsis")
+    for _, row in df.head(50).iterrows():
+        table.add_row(str(row["bvid"]), str(row["change_type"]), str(row["field"]),
+                      str(row["old_value"]), str(row["new_value"]))
+    console.print(table)
+    if len(df) > 50:
+        console.print(f"[dim]仅展示前 50 行，完整差异见输出 CSV（共 {len(df)} 行）[/dim]")
+
+    out_dir = output or os.path.dirname(os.path.abspath(snapshot_b))
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "corpus_diff.csv")
+    df.to_csv(out_path, index=False, encoding='utf-8-sig')
+    console.print(f"  差异表: {out_path}")
 
 
 @cli.command()

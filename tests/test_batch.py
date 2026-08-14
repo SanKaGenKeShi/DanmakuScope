@@ -11,34 +11,24 @@ from danmaku_analyzer.llm_models import ConsensusLevel
 from danmaku_analyzer.prompt_builder import PromptBuilder
 
 
-class _Choice:
-    def __init__(self, content):
-        self.message = type("_Msg", (), {"content": content})()
+class _FakeBackend:
+    """假 LLM 后端：实现 LLMBackend 协议的 complete 接口，按序消费 payload 队列"""
 
-
-class _Response:
-    def __init__(self, content):
-        self.choices = [_Choice(content)]
-
-
-class _FakeAsyncCompletions:
     def __init__(self, payloads):
         self.payloads = list(payloads)
         self.call_count = 0
         self.captured_kwargs = None
 
-    async def create(self, **kwargs):
+    async def complete(self, **kwargs):
         self.captured_kwargs = kwargs
         self.call_count += 1
         payload = self.payloads.pop(0)
         if isinstance(payload, Exception):
             raise payload
-        return _Response(payload)
+        return payload
 
 
-class _FakeAsyncClient:
-    def __init__(self, payloads):
-        self.chat = type("_Chat", (), {"completions": _FakeAsyncCompletions(payloads)})()
+_FakeAsyncClient = _FakeBackend  # 旧名别名，注入点无需改动
 
 
 def _item(emotion="positive", label="expression"):

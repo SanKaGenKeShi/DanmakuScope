@@ -9,6 +9,7 @@ import inspect
 import json
 import subprocess
 import sys
+import types
 
 import pandas as pd
 import pytest
@@ -24,46 +25,24 @@ from danmaku_analyzer import report_generator as report_gen_module
 from test_core_modules import make_danmaku_record
 
 
-# ========== 假 OpenAI 客户端 ==========
+# ========== 假 LLM 后端（实现 LLMBackend 协议的 complete 接口） ==========
 
-class _Msg:
-    def __init__(self, content):
-        self.content = content
-
-
-class _Choice:
-    def __init__(self, content):
-        self.message = _Msg(content)
-
-
-class _Response:
-    def __init__(self, content):
-        self.choices = [_Choice(content)]
-
-
-class _FakeAsyncCompletions:
+class _FakeBackend:
     def __init__(self, payloads):
         self.payloads = list(payloads)
         self.call_count = 0
         self.captured_kwargs = None
 
-    async def create(self, **kwargs):
+    async def complete(self, **kwargs):
         self.captured_kwargs = kwargs
         self.call_count += 1
         payload = self.payloads.pop(0)
         if isinstance(payload, Exception):
             raise payload
-        return _Response(payload)
+        return payload
 
 
-class _FakeAsyncChat:
-    def __init__(self, payloads):
-        self.completions = _FakeAsyncCompletions(payloads)
-
-
-class _FakeAsyncClient:
-    def __init__(self, payloads):
-        self.chat = _FakeAsyncChat(payloads)
+_FakeAsyncClient = _FakeBackend  # 旧名别名，注入点无需改动
 
 
 # ========== 问题2：LLM 分词 POS 归一化 ==========
@@ -93,7 +72,7 @@ class TestPosNormalization:
         analyzer.llm_semaphore = asyncio.Semaphore(4)
         result = asyncio.run(analyzer._llm_tokenize("你好跑"))
         assert result == [("你好", "n"), ("跑", "v")]
-        kwargs = analyzer.llm_client.chat.completions.captured_kwargs
+        kwargs = analyzer.llm_client.captured_kwargs
         assert kwargs["extra_body"] == {
             "enable_thinking": False,
             "chat_template_kwargs": {"enable_thinking": False},
@@ -111,7 +90,7 @@ class TestExtraBodyAlwaysSent:
         fake = _FakeAsyncClient(['{"emotion": {"label": "positive", "confidence": 0.9}}'])
         result = asyncio.run(client._call_llm(fake, "m", "sys", "user", 0.1))
         assert result["emotion"]["label"] == "positive"
-        assert fake.chat.completions.captured_kwargs["extra_body"] == {
+        assert fake.captured_kwargs["extra_body"] == {
             "enable_thinking": flag,
             "chat_template_kwargs": {"enable_thinking": flag},
         }
@@ -124,7 +103,7 @@ class TestExtraBodyAlwaysSent:
         gen.client = fake
         content = asyncio.run(gen._call_llm("sys", "user"))
         assert content == "报告正文"
-        assert fake.chat.completions.captured_kwargs["extra_body"] == {
+        assert fake.captured_kwargs["extra_body"] == {
             "enable_thinking": flag,
             "chat_template_kwargs": {"enable_thinking": flag},
         }
@@ -198,20 +177,45 @@ class TestReportGeneratorRetry:
         gen.client = _FakeAsyncClient([RuntimeError("瞬时故障"), RuntimeError("瞬时故障"), "报告正文"])
         content = asyncio.run(gen.generate([{"tname": "游戏"}], {"tname": "游戏"}))
         assert content == "报告正文"
-        assert gen.client.chat.completions.call_count == 3
+        assert gen.client.call_count == 3
 
     def test_empty_content_triggers_retry(self):
         gen = AnalysisReportGenerator()
         gen.client = _FakeAsyncClient(["", "报告正文"])
         content = asyncio.run(gen.generate([], {"tname": "游戏"}))
         assert content == "报告正文"
-        assert gen.client.chat.completions.call_count == 2
+        assert gen.client.call_count == 2
 
     def test_all_retries_exhausted_returns_none(self):
         gen = AnalysisReportGenerator()
         gen.client = _FakeAsyncClient([RuntimeError("x")] * 3)
         assert asyncio.run(gen.generate([], {"tname": "游戏"})) is None
-        assert gen.client.chat.completions.call_count == 3
+        assert gen.client.call_count == 3
+
+
+# ========== 打开系统终端的平台分支 ==========
+
+class TestOpenSystemTerminal:
+
+    def _launch(self, platform, monkeypatch):
+        from danmaku_analyzer.tui.app import DanmakuTUI
+        argvs = []
+        monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: argvs.append(argv))
+        monkeypatch.setattr(sys, "platform", platform)
+        DanmakuTUI._open_system_terminal(types.SimpleNamespace(notify=lambda *a, **k: None))
+        return argvs
+
+    def test_macos_uses_open_terminal_app(self, monkeypatch):
+        argvs = self._launch("darwin", monkeypatch)
+        assert argvs == [["open", "-a", "Terminal", "danmaku-analyzer", "login"]]
+
+    def test_linux_uses_x_terminal_emulator(self, monkeypatch):
+        argvs = self._launch("linux", monkeypatch)
+        assert argvs == [["x-terminal-emulator", "-e", "danmaku-analyzer login"]]
+
+    def test_windows_uses_cmd_start(self, monkeypatch):
+        argvs = self._launch("win32", monkeypatch)
+        assert argvs[0][:4] == ["cmd", "/c", "start", "cmd"]
 
 
 # ========== 问题5：consensus_ci 写入共识统计表 ==========

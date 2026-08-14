@@ -28,6 +28,7 @@ from .prompt_builder import PromptBuilder
 from .llm_client import LLMClient
 from .aggregator import Aggregator, DanmakuRecord, AggregatedData
 from .reporter import Reporter
+from .reproducibility import write_repro_manifest
 from .statistical_validator import StatisticalValidator
 from .cache_manager import get_cache_manager
 from .corpus_builder import METADATA_FILENAME, CorpusBuilder, validate_zip_archive
@@ -432,6 +433,43 @@ def _build_kappa_records(analysis: SegmentAnalysisOutput) -> List[Dict]:
     return records
 
 
+# 双路一致性量化维度：(raw_outputs 维度键, 类别字段)，句类为单路不参与
+_KAPPA_DIMENSIONS = [
+    ("emotion", "label"),
+    ("interaction_type", "label"),
+    ("orthography", "status"),
+    ("cooperative_principle", "violated"),
+]
+
+
+def _build_quality_metrics(records: List[DanmakuRecord]) -> Dict:
+    """双温度路径间逐维 Cohen's Kappa（阶段 6 一次性聚合：此时 raw_outputs 仍在内存存活，落盘后不可恢复）；
+    与人工复核素材链（kappa_ready.csv）语义不同，仅作全局质控指标"""
+    from .statistical_validator import cohen_kappa
+
+    paired = [
+        r.llm_result.raw_outputs[:2] for r in records
+        if len(r.llm_result.raw_outputs) >= 2
+        and all(isinstance(o, dict) for o in r.llm_result.raw_outputs[:2])
+    ]
+    if not paired:
+        return {}
+
+    kappas = {}
+    for dim_key, field_name in _KAPPA_DIMENSIONS:
+        labels_a, labels_b = [], []
+        for first, second in paired:
+            value_a = (first.get(dim_key) or {}).get(field_name)
+            value_b = (second.get(dim_key) or {}).get(field_name)
+            if value_a is None or value_b is None:
+                continue
+            labels_a.append(value_a)
+            labels_b.append(value_b)
+        kappa = cohen_kappa(labels_a, labels_b)
+        kappas[f"{dim_key}.{field_name}"] = round(kappa, 4) if kappa is not None else None
+    return {"dual_path_samples": len(paired), "cohen_kappa": kappas}
+
+
 def _package_reports_zip(reports: dict, zip_path: str, progress: ProgressCallback) -> bool:
     """ZIP 打包 + 完整性校验；校验通过后清理散落源文件，写入异常/报告缺失时保留源文件返回失败"""
     missing = [name for name, path in reports.items() if not os.path.exists(path)]
@@ -496,9 +534,16 @@ async def _stage_report(
         "pipeline_version": __version__,
         "batch_segment_analysis": options.settings.ENABLE_BATCH_SEGMENT_ANALYSIS,
     }
+    quality_metrics = _build_quality_metrics(analysis.records)
+    if quality_metrics:
+        video_metadata["quality_metrics"] = quality_metrics
     reports = reporter.generate_reports(
         aggregated, kappa_records=_build_kappa_records(analysis), metadata=video_metadata
     )
+    reports["methodology"] = reporter.generate_methodology(
+        video_metadata, sampling={"freq_based": options.use_freq_based, "top_n": options.use_top_n}
+    )
+    reports["repro_manifest"] = write_repro_manifest(reporter.output_dir)
     progress("报告生成", "报告生成完成")
 
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
@@ -638,6 +683,75 @@ def _try_resume_item(item: CompareItem, index: Dict[str, Dict], key: str, progre
     return True
 
 
+async def _process_compare_item(
+    task,
+    item: CompareItem,
+    store: CorpusStore,
+    progress_index: Dict[str, Dict],
+    idx: int,
+    total: int,
+    *,
+    reuse: bool,
+    resume: bool,
+    output_dir: Optional[str],
+    progress: ProgressCallback,
+) -> None:
+    """单个比对任务的完整处置：调度器恢复/进度文件跳过/索引复用/重新分析，终态回写 task 供持久化"""
+    raw = task.input
+
+    if task.status in ("done", "reused"):
+        zip_path = _resolve_progress_zip_path(task.zip_path)
+        if zip_path and os.path.exists(zip_path):
+            item.bvid, item.zip_path = task.bvid, zip_path
+            item.reused = task.status == "reused"
+            item.ok = True
+            progress("比对分析", f"[{idx}/{total}] 中断恢复跳过（调度器状态已完成）: {task.bvid or raw}")
+            return
+        progress("比对分析", f"[{idx}/{total}] 历史产物缺失，重新执行: {raw}")
+
+    if resume and _try_resume_item(item, progress_index, raw, progress, total, idx):
+        task.status = "reused"
+        task.bvid, task.zip_path = item.bvid, _relativize_zip_path(item.zip_path)
+        return
+
+    bvid = await _stage_resolve_input(raw, progress)
+    item.bvid = bvid
+    task.bvid = bvid
+
+    if resume and _try_resume_item(item, progress_index, bvid, progress, total, idx):
+        task.status = "reused"
+        task.zip_path = _relativize_zip_path(item.zip_path)
+        return
+
+    if reuse:
+        zip_path = _find_reusable_zip(store, bvid)
+        if zip_path:
+            item.zip_path = zip_path
+            item.reused = True
+            item.ok = True
+            _append_progress(raw, bvid, zip_path, reused=True)
+            task.status = "reused"
+            task.zip_path = _relativize_zip_path(zip_path)
+            progress("比对分析", f"[{idx}/{total}] 复用已有报告: {bvid}")
+            return
+
+    analysis = await analyze_video(
+        raw,
+        output_dir=output_dir,
+        progress_callback=progress,
+        no_cache=not reuse,
+    )
+    if not (analysis.zip_valid and analysis.zip_path):
+        raise RuntimeError(f"分析未产生有效报告: {bvid}")
+    item.zip_path = analysis.zip_path
+    item.title = analysis.title
+    item.ok = True
+    _append_progress(raw, bvid, analysis.zip_path, reused=False)
+    task.status = "done"
+    task.zip_path = _relativize_zip_path(analysis.zip_path)
+    progress("比对分析", f"[{idx}/{total}] 分析完成: {bvid}")
+
+
 def _find_reusable_zip(store: CorpusStore, bvid: str) -> str:
     """索引中查找该 bvid 已登记的可用报告 ZIP（非空且含 metadata.json），不可用返回空串"""
     for video in store.get_videos():
@@ -663,50 +777,42 @@ async def compare_videos(
     progress: ProgressCallback = _default_progress,
     resume: bool = False,
 ) -> CompareResult:
-    """批量比对：逐条执行个体分析（reuse 时索引中已有可用报告则复用跳过，resume 时命中进度文件则跳过），
-    随后语料库级聚合、推断统计并打包快照；单项成功即落盘 progress.jsonl"""
+    """批量比对：任务调度器并发执行个体分析（中断后按任务状态无损恢复；reuse 时索引中已有可用报告则复用，
+    resume 时命中进度文件则跳过），随后语料库级聚合、推断统计并打包快照；单项成功即落盘 progress.jsonl"""
+    from .scheduler import TaskScheduler
+
     result = CompareResult()
     store = CorpusStore()
     progress_index = _load_progress() if resume else {}
 
-    for idx, raw in enumerate(input_list, start=1):
-        item = CompareItem(raw_input=raw)
-        result.items.append(item)
+    items: Dict[str, CompareItem] = {}
+    for raw in input_list:
+        if raw not in items:
+            items[raw] = CompareItem(raw_input=raw)
+    ordered_inputs = list(items.keys())
+    if len(ordered_inputs) < len(input_list):
+        progress("比对分析", f"输入含 {len(input_list) - len(ordered_inputs)} 个重复项，已合并为同一任务")
+    result.items = [items[raw] for raw in ordered_inputs]
+
+    scheduler = TaskScheduler()
+    scheduler.submit(ordered_inputs)
+    total = len(ordered_inputs)
+
+    async def _handle_task(task) -> None:
+        item = items[task.input]
+        idx = ordered_inputs.index(task.input) + 1
         try:
-            if resume and _try_resume_item(item, progress_index, raw, progress, len(input_list), idx):
-                continue
-            bvid = await _stage_resolve_input(raw, progress)
-            item.bvid = bvid
-            if resume and _try_resume_item(item, progress_index, bvid, progress, len(input_list), idx):
-                continue
-            if reuse:
-                zip_path = _find_reusable_zip(store, bvid)
-                if zip_path:
-                    item.zip_path = zip_path
-                    item.reused = True
-                    item.ok = True
-                    _append_progress(raw, bvid, zip_path, reused=True)
-                    progress("比对分析", f"[{idx}/{len(input_list)}] 复用已有报告: {bvid}")
-                    continue
-            analysis = await analyze_video(
-                raw,
-                output_dir=output_dir,
-                progress_callback=progress,
-                no_cache=not reuse,
+            await _process_compare_item(
+                task, item, store, progress_index, idx, total,
+                reuse=reuse, resume=resume, output_dir=output_dir, progress=progress,
             )
-            if analysis.zip_valid and analysis.zip_path:
-                item.zip_path = analysis.zip_path
-                item.title = analysis.title
-                item.ok = True
-                _append_progress(raw, bvid, analysis.zip_path, reused=False)
-                progress("比对分析", f"[{idx}/{len(input_list)}] 分析完成: {bvid}")
-            else:
-                item.error = "分析未产生有效报告"
-                progress("比对分析", f"[{idx}/{len(input_list)}] 分析失败: {bvid}（无有效报告）")
         except Exception as e:
             item.error = str(e)
-            logger.error(f"比对分析单项失败: {raw} - {e}")
-            progress("比对分析", f"[{idx}/{len(input_list)}] 分析失败: {raw} - {e}")
+            logger.error(f"比对分析单项失败: {task.input} - {e}")
+            progress("比对分析", f"[{idx}/{total}] 分析失败: {task.input} - {e}")
+            raise
+
+    await scheduler.run(_handle_task)
 
     zip_paths = [item.zip_path for item in result.items if item.ok and item.zip_path]
     if not zip_paths:
@@ -720,7 +826,7 @@ async def compare_videos(
         progress("语料库聚合", warning)
 
     settings = get_settings()
-    extra_files: List[str] = []
+    extra_files: List[str] = [write_repro_manifest(build_result.output_dir)]
 
     if settings.ENABLE_CORPUS_STATISTICS:
         comparison = StatisticalValidator().corpus_compare(build_result.videos_csv_path)

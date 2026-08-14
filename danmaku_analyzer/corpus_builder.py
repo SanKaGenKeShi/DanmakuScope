@@ -10,9 +10,10 @@ import zipfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 import pandas as pd
+from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
 from .config import get_settings
@@ -22,6 +23,7 @@ from .utils.logger import get_logger
 logger = get_logger(__name__)
 
 METADATA_FILENAME = "metadata.json"
+VIDEOS_CSV_FILENAME = "corpus_videos.csv"
 
 # ZIP 内需回读的表：文件名 → 除 danmaku_count 外的标量列（其余列视为分布占比）
 TABLE_SPECS = {
@@ -44,6 +46,25 @@ SCALAR_FIELDS = [
     "high_consensus_rate", "medium_consensus_rate", "low_consensus_rate",
     "avg_weight_multiplier", "cooperative_principle_violation_rate",
 ]
+
+
+class CorpusManifest(BaseModel):
+    """语料库快照元数据 schema 单一数据源：package_snapshot 写出前强制校验"""
+    generated_at: str
+    pipeline_version: str
+    zone_policy: Literal["hot_only", "all", "weighted"]
+    temporal_grouping: bool
+    temporal_granularity: Literal["year", "quarter", "month"]
+    video_count: int = Field(ge=0)
+    bvids: List[str]
+    prompt_versions: List[str]
+    warnings: List[str]
+
+    @model_validator(mode="after")
+    def _check_consistency(self):
+        if self.video_count != len(self.bvids):
+            raise ValueError(f"video_count ({self.video_count}) 与 bvids 清单长度 ({len(self.bvids)}) 不一致")
+        return self
 
 
 def validate_zip_archive(zip_path: str, expected_count: int) -> bool:
@@ -85,6 +106,34 @@ class CorpusBuildResult:
     warnings: List[str] = field(default_factory=list)
     zip_path: Optional[str] = None
     zip_valid: bool = False
+
+
+# diff 数值差异判定容差（浮点回读噪声）
+DIFF_NUMERIC_TOLERANCE = 1e-9
+# 参与变更比对的字段：身份/版本/规模 + 全部标量指标
+DIFF_FIELDS = ("tname", "prompt_version", "danmaku_count") + tuple(SCALAR_FIELDS)
+
+
+@dataclass
+class DiffReport:
+    """语料库快照间差异：新增/移除视频与逐字段变更"""
+    added: List[Dict] = field(default_factory=list)
+    removed: List[Dict] = field(default_factory=list)
+    changed: List[Dict] = field(default_factory=list)  # {"bvid", "fields": {字段: {"old", "new"}}}
+
+    def to_dataframe(self) -> pd.DataFrame:
+        rows = []
+        for record in self.added:
+            rows.append({"bvid": record["bvid"], "change_type": "added", "field": "(整视频)",
+                         "old_value": "", "new_value": f"{record.get('tname', '')} / {record.get('danmaku_count', 0)} 条弹幕"})
+        for record in self.removed:
+            rows.append({"bvid": record["bvid"], "change_type": "removed", "field": "(整视频)",
+                         "old_value": f"{record.get('tname', '')} / {record.get('danmaku_count', 0)} 条弹幕", "new_value": ""})
+        for record in self.changed:
+            for name, delta in record["fields"].items():
+                rows.append({"bvid": record["bvid"], "change_type": "changed", "field": name,
+                             "old_value": delta["old"], "new_value": delta["new"]})
+        return pd.DataFrame(rows, columns=["bvid", "change_type", "field", "old_value", "new_value"])
 
 
 class CorpusBuilder:
@@ -312,6 +361,8 @@ class CorpusBuilder:
         """
         out_dir = result.output_dir
         meta = self.build_snapshot_metadata(result)
+        # schema 校验失败直接抛错（不静默通过），由调用方呈现打包失败
+        CorpusManifest.model_validate(meta)
         meta_path = os.path.join(out_dir, "corpus_metadata.json")
         with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -439,6 +490,61 @@ class CorpusBuilder:
         versions = {s.prompt_version for s in summaries if s.prompt_version}
         if len(versions) > 1:
             logger.warning(f"语料库混入多个 prompt_version: {sorted(versions)}，软标签跨版本可比性存疑")
+
+    def diff(self, snapshot_a: str, snapshot_b: str) -> DiffReport:
+        """两份语料库快照（快照 ZIP 或 corpus_videos.csv）的视频级差异：新增/移除/逐字段变更"""
+        obs_a = self._load_snapshot_observations(snapshot_a)
+        obs_b = self._load_snapshot_observations(snapshot_b)
+        keys_a, keys_b = set(obs_a), set(obs_b)
+
+        changed = []
+        for bvid in sorted(keys_a & keys_b):
+            fields = {}
+            for name in DIFF_FIELDS:
+                old, new = obs_a[bvid].get(name), obs_b[bvid].get(name)
+                if isinstance(old, float) and isinstance(new, float):
+                    if abs(old - new) > DIFF_NUMERIC_TOLERANCE:
+                        fields[name] = {"old": old, "new": new}
+                elif old != new:
+                    fields[name] = {"old": old, "new": new}
+            if fields:
+                changed.append({"bvid": bvid, "fields": fields})
+
+        report = DiffReport(
+            added=[obs_b[k] for k in sorted(keys_b - keys_a)],
+            removed=[obs_a[k] for k in sorted(keys_a - keys_b)],
+            changed=changed,
+        )
+        logger.info(
+            f"语料库快照对比完成: 新增 {len(report.added)}，移除 {len(report.removed)}，变更 {len(report.changed)}"
+        )
+        return report
+
+    @staticmethod
+    def _load_snapshot_observations(path: str) -> Dict[str, Dict]:
+        """快照 ZIP（含 corpus_videos.csv）或观测表 CSV → 按 bvid 索引的视频级观测；
+        同 bvid 多区行（zone_policy=all）合并为单条：弹幕数求和、标量取均值"""
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path, 'r') as zipf:
+                if VIDEOS_CSV_FILENAME not in zipf.namelist():
+                    raise ValueError(f"快照 ZIP 缺少 {VIDEOS_CSV_FILENAME}: {path}")
+                df = pd.read_csv(io.BytesIO(zipf.read(VIDEOS_CSV_FILENAME)), encoding='utf-8-sig')
+        else:
+            df = pd.read_csv(path, encoding='utf-8-sig')
+        if "bvid" not in df.columns:
+            raise ValueError(f"观测表缺少 bvid 列，无法对比: {path}")
+
+        observations: Dict[str, Dict] = {}
+        for bvid, group in df.groupby("bvid"):
+            obs: Dict = {"bvid": str(bvid)}
+            for name in ("tname", "prompt_version"):
+                obs[name] = str(group[name].iloc[0]) if name in group.columns else ""
+            obs["danmaku_count"] = int(group["danmaku_count"].sum()) if "danmaku_count" in group.columns else 0
+            for name in SCALAR_FIELDS:
+                if name in group.columns:
+                    obs[name] = float(pd.to_numeric(group[name], errors="coerce").mean() or 0.0)
+            observations[str(bvid)] = obs
+        return observations
 
     @staticmethod
     def _bucket_pubdate(pubdate: str, granularity: str) -> str:

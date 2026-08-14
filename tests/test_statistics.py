@@ -12,6 +12,7 @@ from danmaku_analyzer.corpus_builder import SCALAR_FIELDS
 from danmaku_analyzer.statistical_validator import (
     STATISTICAL_TESTS_COLUMNS,
     StatisticalValidator,
+    cohen_kappa,
 )
 
 
@@ -182,3 +183,31 @@ class TestCorpusCompare:
         df = pd.read_csv(out, encoding='utf-8-sig')
         assert list(df.columns) == STATISTICAL_TESTS_COLUMNS
         assert len(df) == 0
+
+
+class TestCohenKappa:
+
+    def test_perfect_agreement(self):
+        assert cohen_kappa(["a", "b", "a"], ["a", "b", "a"]) == pytest.approx(1.0)
+
+    def test_hand_computed_value(self):
+        # po=0.75, pe=0.5 → kappa=0.5
+        labels_a = ["pos", "pos", "neg", "neg"]
+        labels_b = ["pos", "neg", "neg", "neg"]
+        assert cohen_kappa(labels_a, labels_b) == pytest.approx(0.5)
+
+    def test_chance_agreement_near_zero(self):
+        # 边际分布对称且按期望比例一致时 kappa 趋近 0
+        labels_a = ["a", "a", "b", "b"]
+        labels_b = ["a", "b", "a", "b"]
+        assert cohen_kappa(labels_a, labels_b) == pytest.approx(0.0)
+
+    def test_empty_or_mismatched_returns_none(self):
+        assert cohen_kappa([], []) is None
+        assert cohen_kappa(["a"], ["a", "b"]) is None
+
+    def test_degenerate_both_constant_same(self):
+        assert cohen_kappa(["a", "a"], ["a", "a"]) == pytest.approx(1.0)
+
+    def test_supports_boolean_labels(self):
+        assert cohen_kappa([True, False], [True, False]) == pytest.approx(1.0)

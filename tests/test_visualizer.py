@@ -1,5 +1,5 @@
 """
-R 可视化脚本模板单元测试 - 模板渲染完整性 + statistical_tests.csv 列名契约 + 文件写出
+可视化脚本模板单元测试 - R/Python 双后端模板渲染完整性 + statistical_tests.csv 列名契约 + 后端分发 + 文件写出
 """
 
 import os
@@ -7,8 +7,10 @@ import os
 import pandas as pd
 import pytest
 
+from danmaku_analyzer.config import get_settings
 from danmaku_analyzer.corpus_builder import SCALAR_FIELDS
 from danmaku_analyzer.corpus_visualizer import (
+    PYTHON_SCRIPT_FILENAME,
     STATS_CSV_FILENAME,
     CorpusVisualizer,
     R_SCRIPT_FILENAME,
@@ -130,3 +132,76 @@ class TestWriteRScript:
         with open(path, "rb") as f:
             raw = f.read()
         assert b"\r\n" not in raw
+
+
+class TestRenderPythonScript:
+
+    def test_placeholders_resolved(self, visualizer):
+        script = visualizer.render_python_script()
+        assert "{scalars}" not in script
+        assert "{partitions}" not in script
+        assert "{csv_filename}" not in script
+        assert "{stats_filename}" not in script
+
+    def test_default_filenames_and_scalars_embedded(self, visualizer):
+        script = visualizer.render_python_script()
+        assert '"corpus_videos.csv"' in script
+        assert f'"{STATS_CSV_FILENAME}"' in script
+        for name in SCALAR_FIELDS:
+            assert f'"{name}"' in script
+
+    def test_partitions_injected(self, visualizer):
+        script = visualizer.render_python_script(partitions=["音乐", "游戏"])
+        assert 'partitions = ["音乐", "游戏"]' in script
+
+    def test_key_constructs_present(self, visualizer):
+        script = visualizer.render_python_script()
+        assert "sns.boxplot" in script
+        assert "sns.stripplot" in script
+        assert 'savefig("corpus_boxplots.png"' in script
+        assert 'savefig("corpus_distributions.pdf"' in script
+        assert 'test_type"] == "Kruskal-Wallis"' in script
+
+    def test_reads_precomputed_statistics_only_no_recompute(self, visualizer):
+        script = visualizer.render_python_script()
+        assert "kruskal(" not in script
+        assert "mannwhitneyu(" not in script
+
+    def test_no_multiple_comparison_correction(self, visualizer):
+        script = visualizer.render_python_script()
+        assert "multipletests" not in script
+        assert "未校正" in script
+
+    def test_generated_script_compiles(self, visualizer):
+        compile(visualizer.render_python_script(), "<template>", "exec")
+
+
+class TestWritePythonScript:
+
+    def test_writes_file_and_returns_path(self, visualizer, tmp_path):
+        path = visualizer.write_python_script(str(tmp_path))
+        assert path == os.path.join(str(tmp_path), PYTHON_SCRIPT_FILENAME)
+        assert os.path.exists(path)
+
+    def test_partitions_read_from_videos_csv(self, visualizer, tmp_path):
+        out_dir = str(tmp_path)
+        pd.DataFrame([
+            {"bvid": "BV1a", "tname": "游戏", "content_word_density": 0.5},
+            {"bvid": "BV1b", "tname": "音乐", "content_word_density": 0.6},
+        ]).to_csv(os.path.join(out_dir, "corpus_videos.csv"), index=False, encoding='utf-8-sig')
+        path = visualizer.write_python_script(out_dir)
+        with open(path, encoding="utf-8") as f:
+            assert 'partitions = ["游戏", "音乐"]' in f.read()
+
+
+class TestBackendDispatch:
+
+    def test_default_backend_python(self, visualizer, tmp_path, monkeypatch):
+        monkeypatch.setattr(get_settings(), "VISUALIZATION_BACKEND", "python")
+        path = visualizer.write_script(str(tmp_path))
+        assert path.endswith(PYTHON_SCRIPT_FILENAME)
+
+    def test_r_backend_dispatch(self, visualizer, tmp_path, monkeypatch):
+        monkeypatch.setattr(get_settings(), "VISUALIZATION_BACKEND", "r")
+        path = visualizer.write_script(str(tmp_path))
+        assert path.endswith(R_SCRIPT_FILENAME)

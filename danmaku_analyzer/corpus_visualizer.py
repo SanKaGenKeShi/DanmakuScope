@@ -1,8 +1,8 @@
 """
-语料库可视化模块 - 生成 R/ggplot2 脚本模板（零新增 Python 依赖）
-消费 corpus_videos.csv 视频级观测表，输出可直接 Rscript 出图的 corpus_plots.R：
+语料库可视化模块 - 双后端脚本模板生成（R/ggplot2 与 Python/matplotlib+seaborn，均零运行时依赖）
+消费 corpus_videos.csv 视频级观测表，按 VISUALIZATION_BACKEND 配置产出可直接执行的可视化脚本：
 分区间箱线图（叠加 statistical_tests.csv 预计算的 Kruskal-Wallis p 值）、分布列堆叠条形图。
-统计检验由 Python 侧 statistical_validator.corpus_compare 预计算，R 脚本不重复计算，
+统计检验由 Python 侧 statistical_validator.corpus_compare 预计算，生成脚本不重复计算，
 亦不实施任何多重比较校正（p 值均为未校正）。
 """
 
@@ -11,12 +11,14 @@ from typing import List, Optional
 
 import pandas as pd
 
+from .config import get_settings
 from .corpus_builder import SCALAR_FIELDS
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 R_SCRIPT_FILENAME = "corpus_plots.R"
+PYTHON_SCRIPT_FILENAME = "corpus_plots.py"
 VIDEOS_CSV_FILENAME = "corpus_videos.csv"
 STATS_CSV_FILENAME = "statistical_tests.csv"
 
@@ -108,6 +110,107 @@ if (length(dist_cols) > 0) {{
 cat("完成：corpus_boxplots.* / corpus_distributions.*\\n")
 '''
 
+# Python 后端模板：占位符同 R 模板；生成代码刻意不使用花括号（dict/f-string），避免 .format 转义噪声
+PYTHON_SCRIPT_TEMPLATE = '''\
+# DanmakuScope 语料库可视化脚本（Python 后端自动生成模板，可自由修改）
+# 统计单位：视频级观测（corpus_videos.csv 每行一个视频）
+# 推断检验结果由 Python 侧 statistical_tests.csv 预计算（未校正 p 值，无多重比较校正），本脚本仅读取叠加，不重复计算
+# 用法：python corpus_plots.py [corpus_videos.csv 路径] [statistical_tests.csv 路径]
+# 依赖：pip install "danmaku-analyzer[viz]" 或 pip install "matplotlib>=3.7" "seaborn>=0.12" pandas
+
+import os
+import sys
+
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+csv_path = sys.argv[1] if len(sys.argv) > 1 else "{csv_filename}"
+stats_path = sys.argv[2] if len(sys.argv) > 2 else "{stats_filename}"
+
+# 中文分区名如显示为方框，取消下行注释并换成本机已安装的中文字体
+# plt.rcParams["font.sans-serif"] = ["Microsoft YaHei"]
+plt.rcParams["axes.unicode_minus"] = False
+
+videos = pd.read_csv(csv_path, encoding="utf-8-sig")
+scalar_metrics = [{scalars}]
+partitions = [{partitions}]
+
+videos = videos[videos["tname"].notna() & (videos["tname"] != "")]
+if partitions:
+    videos["tname"] = pd.Categorical(videos["tname"], categories=partitions)
+    videos = videos[videos["tname"].notna()]
+
+# ---- 1. 读取 Python 侧预计算推断检验结果（缺失时降级为纯箱线图） ----
+kw_labels = dict()
+if os.path.exists(stats_path):
+    stats_df = pd.read_csv(stats_path, encoding="utf-8-sig")
+    print(stats_df)
+    kw = stats_df[(stats_df["test_type"] == "Kruskal-Wallis") & stats_df["p_value"].notna()]
+    for _, row in kw.iterrows():
+        kw_labels[row["metric"]] = "%.4g" % row["p_value"]
+else:
+    print("未找到 " + stats_path + "，箱线图不叠加检验结果")
+
+# ---- 2. 核心指标分区间箱线图（每视频一个点，子图标题叠加 KW p 值） ----
+metric_long = videos.melt(
+    id_vars="tname",
+    value_vars=[m for m in scalar_metrics if m in videos.columns],
+    var_name="metric", value_name="value",
+)
+metrics_present = sorted(metric_long["metric"].unique())
+if metrics_present:
+    cols_n = min(3, len(metrics_present))
+    rows_n = (len(metrics_present) + cols_n - 1) // cols_n
+    fig, axes = plt.subplots(rows_n, cols_n, figsize=(5 * cols_n, 4 * rows_n), squeeze=False)
+    for i, metric in enumerate(metrics_present):
+        ax = axes[i // cols_n][i % cols_n]
+        sub = metric_long[metric_long["metric"] == metric]
+        sns.boxplot(data=sub, x="tname", y="value", ax=ax)
+        sns.stripplot(data=sub, x="tname", y="value", color="0.3", size=3, ax=ax)
+        title = metric
+        if metric in kw_labels:
+            title += "\\nKW p=" + kw_labels[metric]
+        ax.set_title(title)
+        ax.tick_params(axis="x", rotation=45)
+    for j in range(len(metrics_present), rows_n * cols_n):
+        axes[j // cols_n][j % cols_n].axis("off")
+    fig.tight_layout()
+    fig.savefig("corpus_boxplots.png", dpi=300)
+    fig.savefig("corpus_boxplots.pdf")
+
+# ---- 3. 分布列堆叠条形图（按弹幕数加权均值，前缀分组） ----
+identity_cols = ["bvid", "tname", "pubdate", "prompt_version", "zone_type", "danmaku_count"]
+dist_cols = [c for c in videos.columns if c not in identity_cols and c not in scalar_metrics]
+if dist_cols:
+    dist_long = videos.melt(
+        id_vars=["tname", "danmaku_count"], value_vars=dist_cols,
+        var_name="category", value_name="value",
+    )
+    dist_long["group"] = dist_long["category"].str.split("_").str[0]
+    dist_long["weighted"] = dist_long["value"] * dist_long["danmaku_count"]
+    agg = dist_long.groupby(["group", "tname", "category"], as_index=False).agg(
+        weighted=("weighted", "sum"), total_danmaku=("danmaku_count", "sum")
+    )
+    agg["value"] = agg["weighted"] / agg["total_danmaku"]
+    groups = sorted(agg["group"].unique())
+    fig2, axes2 = plt.subplots(1, len(groups), figsize=(6 * len(groups), 5), squeeze=False)
+    for gi, group in enumerate(groups):
+        ax = axes2[0][gi]
+        pivot = agg[agg["group"] == group].pivot(index="tname", columns="category", values="value").fillna(0)
+        pivot.plot(kind="bar", stacked=True, ax=ax)
+        ax.set_title(group)
+        ax.set_ylabel("加权占比")
+        ax.tick_params(axis="x", rotation=45)
+    fig2.tight_layout()
+    fig2.savefig("corpus_distributions.png", dpi=300)
+    fig2.savefig("corpus_distributions.pdf")
+
+print("完成：corpus_boxplots.* / corpus_distributions.*")
+'''
+
 
 class CorpusVisualizer:
 
@@ -139,6 +242,36 @@ class CorpusVisualizer:
             f.write(self.render_r_script(csv_filename, partitions))
         logger.info(f"R 可视化脚本已保存: {filepath}（注入分区 {len(partitions)} 个）")
         return filepath
+
+    def render_python_script(
+        self,
+        csv_filename: str = VIDEOS_CSV_FILENAME,
+        partitions: Optional[List[str]] = None,
+        stats_filename: str = STATS_CSV_FILENAME,
+    ) -> str:
+        scalars = ", ".join(f'"{name}"' for name in SCALAR_FIELDS)
+        partition_literal = ", ".join(f'"{name}"' for name in (partitions or []))
+        return PYTHON_SCRIPT_TEMPLATE.format(
+            scalars=scalars,
+            partitions=partition_literal,
+            csv_filename=csv_filename,
+            stats_filename=stats_filename,
+        )
+
+    def write_python_script(self, out_dir: str, csv_filename: str = VIDEOS_CSV_FILENAME) -> str:
+        os.makedirs(out_dir, exist_ok=True)
+        filepath = os.path.join(out_dir, PYTHON_SCRIPT_FILENAME)
+        partitions = self._read_partitions(out_dir, csv_filename)
+        with open(filepath, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(self.render_python_script(csv_filename, partitions))
+        logger.info(f"Python 可视化脚本已保存: {filepath}（注入分区 {len(partitions)} 个）")
+        return filepath
+
+    def write_script(self, out_dir: str, csv_filename: str = VIDEOS_CSV_FILENAME) -> str:
+        """按 VISUALIZATION_BACKEND 配置分发后端（r / python）"""
+        if get_settings().VISUALIZATION_BACKEND == "r":
+            return self.write_r_script(out_dir, csv_filename)
+        return self.write_python_script(out_dir, csv_filename)
 
     @staticmethod
     def _read_partitions(out_dir: str, csv_filename: str) -> List[str]:

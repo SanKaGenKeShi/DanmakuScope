@@ -9,12 +9,11 @@ import asyncio
 from typing import Dict, Any, List, Optional
 
 import regex
-from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .config import get_settings
 from .llm_config import get_llm_settings
-from .llm_factory import complex_async_client, simple_async_client
+from .llm_factory import complex_backend, simple_backend
 from .prompt_builder import PromptComponents
 from .utils.logger import get_logger
 from .llm_models import ConsensusLevel, LLMOutput, DualPathResult, SentenceFunctionOutput
@@ -34,11 +33,11 @@ class LLMClient:
         llm_cfg = get_llm_settings()
         
         self.semaphore = asyncio.Semaphore(get_settings().LLM_CONCURRENCY)
-        self.complex_client = complex_async_client(timeout=llm_cfg.COMPLEX_LLM_TIMEOUT)
+        self.complex_client = complex_backend(timeout=llm_cfg.COMPLEX_LLM_TIMEOUT)
         self.complex_model = llm_cfg.COMPLEX_LLM_MODEL
         self.complex_temperatures = llm_cfg.COMPLEX_LLM_TEMPERATURES
         
-        self.simple_client = simple_async_client(timeout=llm_cfg.SIMPLE_LLM_TIMEOUT)
+        self.simple_client = simple_backend(timeout=llm_cfg.SIMPLE_LLM_TIMEOUT)
         self.simple_model = llm_cfg.SIMPLE_LLM_MODEL
         self.simple_temperature = llm_cfg.SIMPLE_LLM_TEMPERATURE
         
@@ -61,7 +60,7 @@ class LLMClient:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _call_llm(
         self, 
-        client: AsyncOpenAI,
+        client,
         model: str,
         system_prompt: str,
         user_prompt: str,
@@ -72,10 +71,10 @@ class LLMClient:
             return await self._call_llm_once(
                 client, model, system_prompt, user_prompt, temperature, enable_thinking
             )
-
+    
     async def _call_llm_once(
         self,
-        client: AsyncOpenAI,
+        client,
         model: str,
         system_prompt: str,
         user_prompt: str,
@@ -84,7 +83,7 @@ class LLMClient:
     ) -> Dict[str, Any]:
         thinking = self.enable_thinking if enable_thinking is None else enable_thinking
         try:
-            response = await client.chat.completions.create(
+            content = await client.complete(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -98,9 +97,7 @@ class LLMClient:
                     "chat_template_kwargs": {"enable_thinking": thinking},
                 },
             )
-            
-            content = response.choices[0].message.content
-            
+                
             try:
                 result = json.loads(content)
                 return result
@@ -112,7 +109,7 @@ class LLMClient:
                     return json.loads(json_match.group())
                 else:
                     raise ValueError(f"无法从响应中提取 JSON: {content}")
-            
+                
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
             raise

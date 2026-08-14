@@ -72,8 +72,12 @@ class CorpusStore:
         self.save(index)
         return entry
 
-    def get_videos(self) -> List[Dict]:
-        return self.load()["videos"]
+    def get_videos(self, as_of: Optional[str] = None) -> List[Dict]:
+        """索引视频清单；as_of（ISO 时间戳）非空时仅返回可证实该时点前登记的观测（无时间戳者排除）"""
+        videos = self.load()["videos"]
+        if as_of:
+            videos = [v for v in videos if v.get("analyzed_at") and v["analyzed_at"] <= as_of]
+        return videos
 
     def resolve_zip_path(self, stored_path: str) -> str:
         """回读索引中的 zip_path：绝对路径直接返回，相对路径基于 DATA_ROOT 解析"""
