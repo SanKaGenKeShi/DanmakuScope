@@ -28,7 +28,7 @@ from .prompt_builder import PromptBuilder
 from .llm_client import LLMClient
 from .aggregator import Aggregator, DanmakuRecord, AggregatedData
 from .reporter import Reporter
-from .reproducibility import write_repro_manifest
+from .reproducibility import ReproManifestBuilder
 from .statistical_validator import StatisticalValidator
 from .cache_manager import get_cache_manager
 from .corpus_builder import METADATA_FILENAME, CorpusBuilder, validate_zip_archive
@@ -442,6 +442,29 @@ _KAPPA_DIMENSIONS = [
 ]
 
 
+def _write_supplementary_reports(
+    reporter: Reporter,
+    video_metadata: Dict,
+    options: PipelineOptions,
+    progress: ProgressCallback,
+) -> Dict[str, str]:
+    """方法论描述与可复现 manifest 写出：失败仅告警降级，不在全部分析完成后拖崩整条流水线"""
+    reports: Dict[str, str] = {}
+    try:
+        reports["methodology"] = reporter.generate_methodology(
+            video_metadata, sampling={"freq_based": options.use_freq_based, "top_n": options.use_top_n}
+        )
+    except OSError as e:
+        logger.warning(f"methodology.md 写出失败，跳过该产出: {e}")
+        progress("报告生成", f"警告：methodology.md 写出失败（{e}），已跳过")
+    try:
+        reports["repro_manifest"] = ReproManifestBuilder().write(reporter.output_dir)
+    except OSError as e:
+        logger.warning(f"repro_manifest.json 写出失败，跳过该产出: {e}")
+        progress("报告生成", f"警告：repro_manifest.json 写出失败（{e}），已跳过")
+    return reports
+
+
 def _build_quality_metrics(records: List[DanmakuRecord]) -> Dict:
     """双温度路径间逐维 Cohen's Kappa（阶段 6 一次性聚合：此时 raw_outputs 仍在内存存活，落盘后不可恢复）；
     与人工复核素材链（kappa_ready.csv）语义不同，仅作全局质控指标"""
@@ -540,10 +563,7 @@ async def _stage_report(
     reports = reporter.generate_reports(
         aggregated, kappa_records=_build_kappa_records(analysis), metadata=video_metadata
     )
-    reports["methodology"] = reporter.generate_methodology(
-        video_metadata, sampling={"freq_based": options.use_freq_based, "top_n": options.use_top_n}
-    )
-    reports["repro_manifest"] = write_repro_manifest(reporter.output_dir)
+    reports.update(_write_supplementary_reports(reporter, video_metadata, options, progress))
     progress("报告生成", "报告生成完成")
 
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
@@ -696,18 +716,9 @@ async def _process_compare_item(
     output_dir: Optional[str],
     progress: ProgressCallback,
 ) -> None:
-    """单个比对任务的完整处置：调度器恢复/进度文件跳过/索引复用/重新分析，终态回写 task 供持久化"""
+    """单个比对任务的完整处置：进度文件跳过/索引复用/重新分析，终态回写 task 供持久化；
+    调度器恢复的终态任务在 run() 前已由 _restore_recovered_items 处置，不会进入本函数"""
     raw = task.input
-
-    if task.status in ("done", "reused"):
-        zip_path = _resolve_progress_zip_path(task.zip_path)
-        if zip_path and os.path.exists(zip_path):
-            item.bvid, item.zip_path = task.bvid, zip_path
-            item.reused = task.status == "reused"
-            item.ok = True
-            progress("比对分析", f"[{idx}/{total}] 中断恢复跳过（调度器状态已完成）: {task.bvid or raw}")
-            return
-        progress("比对分析", f"[{idx}/{total}] 历史产物缺失，重新执行: {raw}")
 
     if resume and _try_resume_item(item, progress_index, raw, progress, total, idx):
         task.status = "reused"
@@ -770,6 +781,26 @@ def _find_reusable_zip(store: CorpusStore, bvid: str) -> str:
     return ""
 
 
+def _restore_recovered_items(scheduler, items: Dict[str, "CompareItem"], progress: ProgressCallback) -> None:
+    """调度器终态任务不进执行队列，须在 run() 前回填对应 CompareItem（否则恢复跳过的视频缺席聚合）；
+    产物 ZIP 已不存在时重置为 pending 重新执行"""
+    from .scheduler import TERMINAL_STATUSES
+
+    for task in scheduler.tasks:
+        if task.status not in TERMINAL_STATUSES:
+            continue
+        item = items[task.input]
+        zip_path = _resolve_progress_zip_path(task.zip_path)
+        if zip_path and os.path.exists(zip_path):
+            item.bvid, item.zip_path = task.bvid, zip_path
+            item.reused = task.status == "reused"
+            item.ok = True
+            progress("比对分析", f"中断恢复跳过（调度器状态已完成）: {task.bvid or task.input}")
+        else:
+            task.status = "pending"
+            progress("比对分析", f"历史产物缺失，重新执行: {task.input}")
+
+
 async def compare_videos(
     input_list: List[str],
     reuse: bool = True,
@@ -795,7 +826,9 @@ async def compare_videos(
     result.items = [items[raw] for raw in ordered_inputs]
 
     scheduler = TaskScheduler()
-    scheduler.submit(ordered_inputs)
+    # --no-reuse 且非 resume 时用户意图为全量重分析，不得被历史任务状态静默跳过
+    scheduler.submit(ordered_inputs, recover=bool(resume or reuse))
+    _restore_recovered_items(scheduler, items, progress)
     total = len(ordered_inputs)
 
     async def _handle_task(task) -> None:
@@ -826,7 +859,12 @@ async def compare_videos(
         progress("语料库聚合", warning)
 
     settings = get_settings()
-    extra_files: List[str] = [write_repro_manifest(build_result.output_dir)]
+    extra_files: List[str] = []
+    try:
+        extra_files.append(ReproManifestBuilder().write(build_result.output_dir))
+    except OSError as e:
+        logger.warning(f"repro_manifest.json 写出失败，跳过该产出: {e}")
+        progress("语料库聚合", f"警告：repro_manifest.json 写出失败（{e}），已跳过")
 
     if settings.ENABLE_CORPUS_STATISTICS:
         comparison = StatisticalValidator().corpus_compare(build_result.videos_csv_path)

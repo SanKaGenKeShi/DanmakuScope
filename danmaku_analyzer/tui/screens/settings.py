@@ -1,5 +1,7 @@
 """TUI 设置中心 - 界面/分析/路径/LLM/语料库/快捷键 全配置标签页，支持编辑与恢复默认"""
 
+import asyncio
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -36,6 +38,7 @@ _ANALYSIS_DEFAULTS = {
     "ENABLE_FREQ_BASED_SAMPLING": False,
     "ENABLE_BATCH_SEGMENT_ANALYSIS": False,
     "TOP_N": 10,
+    "MOE": 0.05,
     "CONFIDENCE_LEVEL": 0.95,
     "ENABLE_LLM_ANALYSIS_REPORT": True,
     "LLM_CONCURRENCY": 5,
@@ -66,6 +69,8 @@ _CORPUS_DEFAULTS = {
     "ENABLE_TEMPORAL_GROUPING": False,
     "TEMPORAL_GRANULARITY": "year",
     "ENABLE_CORPUS_STATISTICS": True,
+    "SCHEDULER_WORKERS": 2,
+    "VISUALIZATION_BACKEND": "python",
 }
 
 # 分析报告 LLM 未配置时界面直接展示配置现值（占位默认值），不再预填复杂任务值
@@ -222,7 +227,6 @@ class SettingsScreen(ModalScreen[bool]):
             "complex": llm_cfg.COMPLEX_LLM_ENABLE_THINKING,
             "report": llm_cfg.ANALYSIS_REPORT_LLM_ENABLE_THINKING,
         }
-        cred = self._current_credential()
         with Vertical(id="settings-dialog"):
             with TabbedContent(initial="tab-display"):
                 with TabPane(i18n.t("settings.tab_display"), id="tab-display"):
@@ -236,22 +240,22 @@ class SettingsScreen(ModalScreen[bool]):
                 with TabPane(i18n.t("settings.tab_general"), id="tab-general"):
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.credential_status"))
-                        yield Label(self._credential_status_text(), id="credential-status-label")
+                        yield Label("", id="credential-status-label")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.sessdata"))
-                        yield Input(cred.get("sessdata", ""), password=True, id="inp-cred-sessdata")
+                        yield Input("", password=True, id="inp-cred-sessdata")
                         yield Button(i18n.t("settings.key_show"), id="btn-show-cred-sessdata", classes="key-btn")
                         yield Button(i18n.t("settings.key_copy"), id="btn-copy-cred-sessdata", classes="key-btn")
                         yield Button(i18n.t("settings.key_paste"), id="btn-paste-cred-sessdata", classes="key-btn")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.bili_jct"))
-                        yield Input(cred.get("bili_jct", ""), password=True, id="inp-cred-jct")
+                        yield Input("", password=True, id="inp-cred-jct")
                         yield Button(i18n.t("settings.key_show"), id="btn-show-cred-jct", classes="key-btn")
                         yield Button(i18n.t("settings.key_copy"), id="btn-copy-cred-jct", classes="key-btn")
                         yield Button(i18n.t("settings.key_paste"), id="btn-paste-cred-jct", classes="key-btn")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.buvid3"))
-                        yield Input(cred.get("buvid3", ""), password=True, id="inp-cred-buvid3")
+                        yield Input("", password=True, id="inp-cred-buvid3")
                         yield Button(i18n.t("settings.key_show"), id="btn-show-cred-buvid3", classes="key-btn")
                         yield Button(i18n.t("settings.key_copy"), id="btn-copy-cred-buvid3", classes="key-btn")
                         yield Button(i18n.t("settings.key_paste"), id="btn-paste-cred-buvid3", classes="key-btn")
@@ -276,6 +280,9 @@ class SettingsScreen(ModalScreen[bool]):
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.top_n"))
                         yield Input(str(settings.TOP_N), type="integer", id="inp-top-n")
+                    with Static(classes="setting-row"):
+                        yield Label(i18n.t("settings.moe"))
+                        yield Input(str(settings.MOE), type="number", id="inp-moe")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.batch_analysis"))
                         yield Switch(settings.ENABLE_BATCH_SEGMENT_ANALYSIS, id="sw-batch-analysis")
@@ -328,6 +335,16 @@ class SettingsScreen(ModalScreen[bool]):
                             Option(i18n.t("settings.gran_quarter"), id="quarter"),
                             Option(i18n.t("settings.gran_month"), id="month"),
                             id="granularity-options",
+                        )
+                    with Static(classes="setting-row"):
+                        yield Label(i18n.t("settings.scheduler_workers"))
+                        yield Input(str(settings.SCHEDULER_WORKERS), type="integer", id="inp-scheduler-workers")
+                    with Static(classes="setting-row setting-row-tall"):
+                        yield Label(i18n.t("settings.viz_backend"))
+                        yield OptionList(
+                            Option(i18n.t("settings.viz_python"), id="python"),
+                            Option(i18n.t("settings.viz_r"), id="r"),
+                            id="viz-backend-options",
                         )
                 with TabPane(i18n.t("settings.tab_llm"), id="tab-llm"):
                     with Static(classes="setting-row"):
@@ -445,11 +462,12 @@ class SettingsScreen(ModalScreen[bool]):
         self._highlight_option("#seg-mode-options", settings.SEGMENTATION_MODE)
         self._highlight_option("#zone-policy-options", settings.CORPUS_ZONE_POLICY)
         self._highlight_option("#granularity-options", settings.TEMPORAL_GRANULARITY)
+        self._highlight_option("#viz-backend-options", settings.VISUALIZATION_BACKEND)
         self._fill_paths_info()
         self._fill_help_tables()
         self._fill_about_info()
         self._sync_reset_button()
-        self.run_worker(self._refresh_credential_account(), exclusive=False)
+        self.run_worker(self._load_credential_fields(), exclusive=False)
 
     def _constrain_tab_panes(self) -> None:
         """TabPane 默认 height:auto 会撑破小窗口，强制限高并启用滚动；
@@ -506,6 +524,16 @@ class SettingsScreen(ModalScreen[bool]):
             for name, desc in i18n.raw(help_key).items():
                 table.add_row(name, desc)
 
+    async def _load_credential_fields(self) -> None:
+        """后台线程解析凭证并回填输入框与状态文案：compose 内同步调用会触发 bilibili_api 首次导入冻结界面；
+        回填完成后再串行刷新用户名（并行会因缓存命中时本 worker 晚到而把用户名覆盖回来源文案）"""
+        fields, status = await asyncio.to_thread(lambda: (self._current_credential(), self._credential_status_text()))
+        self.query_one("#inp-cred-sessdata", Input).value = fields["sessdata"]
+        self.query_one("#inp-cred-jct", Input).value = fields["bili_jct"]
+        self.query_one("#inp-cred-buvid3", Input).value = fields["buvid3"]
+        self.query_one("#credential-status-label", Label).update(status)
+        await self._refresh_credential_account(fields["sessdata"])
+
     @staticmethod
     def _current_credential() -> dict:
         from ...account import resolve_credential
@@ -537,7 +565,7 @@ class SettingsScreen(ModalScreen[bool]):
         from ...account import fetch_account_info, resolve_credential
 
         if not sessdata:
-            credential, _ = resolve_credential()
+            credential, _ = await asyncio.to_thread(resolve_credential)
             sessdata = (credential.sessdata if credential else "") or ""
         if not sessdata:
             return
@@ -714,6 +742,7 @@ class SettingsScreen(ModalScreen[bool]):
         self.query_one("#sw-freq-sampling", Switch).value = _ANALYSIS_DEFAULTS["ENABLE_FREQ_BASED_SAMPLING"]
         self.query_one("#sw-batch-analysis", Switch).value = _ANALYSIS_DEFAULTS["ENABLE_BATCH_SEGMENT_ANALYSIS"]
         self.query_one("#inp-top-n", Input).value = str(_ANALYSIS_DEFAULTS["TOP_N"])
+        self.query_one("#inp-moe", Input).value = str(_ANALYSIS_DEFAULTS["MOE"])
         self.query_one("#inp-confidence-level", Input).value = str(_ANALYSIS_DEFAULTS["CONFIDENCE_LEVEL"])
         self.query_one("#sw-llm-report", Switch).value = _ANALYSIS_DEFAULTS["ENABLE_LLM_ANALYSIS_REPORT"]
         self.query_one("#inp-concurrency", Input).value = str(_ANALYSIS_DEFAULTS["LLM_CONCURRENCY"])
@@ -726,6 +755,8 @@ class SettingsScreen(ModalScreen[bool]):
         self.query_one("#sw-temporal-grouping", Switch).value = _CORPUS_DEFAULTS["ENABLE_TEMPORAL_GROUPING"]
         self._highlight_option("#granularity-options", _CORPUS_DEFAULTS["TEMPORAL_GRANULARITY"])
         self.query_one("#sw-corpus-statistics", Switch).value = _CORPUS_DEFAULTS["ENABLE_CORPUS_STATISTICS"]
+        self.query_one("#inp-scheduler-workers", Input).value = str(_CORPUS_DEFAULTS["SCHEDULER_WORKERS"])
+        self._highlight_option("#viz-backend-options", _CORPUS_DEFAULTS["VISUALIZATION_BACKEND"])
         self.query_one("#sw-compare-reuse", Switch).value = True
         self.notify(i18n.t("settings.reset_done"), severity="information")
 
@@ -766,6 +797,7 @@ class SettingsScreen(ModalScreen[bool]):
         settings.ENABLE_FREQ_BASED_SAMPLING = self.query_one("#sw-freq-sampling", Switch).value
         settings.ENABLE_BATCH_SEGMENT_ANALYSIS = self.query_one("#sw-batch-analysis", Switch).value
         settings.TOP_N = self._int_value("#inp-top-n", settings.TOP_N)
+        settings.MOE = self._float_value("#inp-moe", settings.MOE)
         settings.CONFIDENCE_LEVEL = self._float_value("#inp-confidence-level", settings.CONFIDENCE_LEVEL)
         settings.ENABLE_LLM_ANALYSIS_REPORT = self.query_one("#sw-llm-report", Switch).value
         settings.LLM_CONCURRENCY = self._int_value("#inp-concurrency", settings.LLM_CONCURRENCY)
@@ -806,6 +838,11 @@ class SettingsScreen(ModalScreen[bool]):
         granularity = gran_options.get_option_at_index(gran_options.highlighted)
         if granularity:
             settings.TEMPORAL_GRANULARITY = str(granularity.id)
+        settings.SCHEDULER_WORKERS = self._int_value("#inp-scheduler-workers", settings.SCHEDULER_WORKERS)
+        viz_options = self.query_one("#viz-backend-options", OptionList)
+        viz_backend = viz_options.get_option_at_index(viz_options.highlighted)
+        if viz_backend:
+            settings.VISUALIZATION_BACKEND = str(viz_backend.id)
 
         self._save_credentials()
 

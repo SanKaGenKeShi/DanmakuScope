@@ -198,11 +198,14 @@ class BilibiliCrawler:
                     uid_hash = hashlib.md5(uid_str.encode()).hexdigest()[:16]
                     identity_type = "real_user"
                 
-                content = d_elem.text or ""
-                
+                content = (d_elem.text or "").strip()
+                if not content:
+                    skipped_count += 1
+                    continue
+
                 danmaku = DanmakuItem(
                     uid_hash=uid_hash,
-                    content=content.strip(),
+                    content=content,
                     time_sec=time_sec,
                     identity_type=identity_type,
                 )
@@ -213,7 +216,7 @@ class BilibiliCrawler:
             raise
         
         if skipped_count:
-            logger.warning(f"XML 弹幕解析跳过 {skipped_count} 条属性不完整的记录（p 属性字段 < 8）")
+            logger.warning(f"XML 弹幕解析跳过 {skipped_count} 条无效记录（p 属性字段 < 8 或内容为空）")
         
         return danmaku_list
     

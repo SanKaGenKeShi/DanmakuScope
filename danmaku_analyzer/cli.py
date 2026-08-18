@@ -282,7 +282,7 @@ async def _run_script_async(tasks: List[Dict]):
 def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_plots: bool):
     """跨视频语料库级聚合（回读单视频 ZIP 报告，按分区输出比较表并打包快照）"""
     from .corpus_builder import CorpusBuilder
-    from .reproducibility import write_repro_manifest
+    from .reproducibility import ReproManifestBuilder
 
     if not from_index and not zip_list:
         console.print("[red]请提供至少一个 ZIP 文件，或使用 --from-index 从语料库索引聚合[/red]")
@@ -297,7 +297,7 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_plots:
         console.print(f"[bold green]语料库聚合完成[/bold green]")
         console.print(f"  聚合表: {result.csv_path}")
 
-        extra_files = [write_repro_manifest(result.output_dir)]
+        extra_files = [ReproManifestBuilder().write(result.output_dir)]
         if with_plots:
             from .corpus_visualizer import CorpusVisualizer
             script_path = CorpusVisualizer().write_script(result.output_dir)
@@ -660,6 +660,8 @@ def config():
     table.add_row("按发布时间分桶", "开启" if settings.ENABLE_TEMPORAL_GROUPING else "关闭")
     if settings.ENABLE_TEMPORAL_GROUPING:
         table.add_row("分桶粒度", settings.TEMPORAL_GRANULARITY)
+    table.add_row("调度器并发数", str(settings.SCHEDULER_WORKERS))
+    table.add_row("可视化脚本后端", settings.VISUALIZATION_BACKEND)
     
     console.print(table)
 

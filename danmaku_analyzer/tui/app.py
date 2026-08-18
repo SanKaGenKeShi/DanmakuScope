@@ -415,11 +415,11 @@ class DanmakuTUI(App):
         self.run_worker(self._preload_heavy_modules(), exclusive=False)
 
     async def _preload_heavy_modules(self) -> None:
-        """后台线程预载重依赖：首次打开设置页会在 compose 内同步导入 account（拖入 bilibili_api/httpx），
+        """后台线程预载重依赖：bilibili_api 全程惰性导入（首开设置页才触发，冷导入约 1.2s），
         首次分析会同步导入 pipeline（拖入 jieba/pandas），均造成界面卡顿，预载后移出关键路径"""
         import importlib
 
-        for name in ("danmaku_analyzer.account", "danmaku_analyzer.pipeline", "openai"):
+        for name in ("bilibili_api", "danmaku_analyzer.account", "danmaku_analyzer.pipeline", "openai"):
             await asyncio.to_thread(importlib.import_module, name)
 
     def _restore_appearance_prefs(self) -> None:

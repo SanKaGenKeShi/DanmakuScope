@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from .corpus_suggester import CorpusSuggester
     from .corpus_visualizer import CorpusVisualizer
     from .scheduler import TaskScheduler, ScheduledTask
-    from .reproducibility import build_repro_manifest
+    from .reproducibility import ReproManifestBuilder
     from .llm_factory import LLMBackend, OpenAICompatibleBackend, OllamaBackend
 
 try:
@@ -69,7 +69,7 @@ __all__ = [
     "CacheManager", "get_cache_manager",
     "CorpusStore", "CorpusBuilder", "CorpusManifest", "DiffReport", "CorpusSuggester", "CorpusVisualizer",
     "TaskScheduler", "ScheduledTask",
-    "build_repro_manifest",
+    "ReproManifestBuilder",
     "LLMBackend", "OpenAICompatibleBackend", "OllamaBackend",
 ]
 
@@ -101,7 +101,7 @@ _LAZY_EXPORTS = {
     "CorpusSuggester": ".corpus_suggester",
     "CorpusVisualizer": ".corpus_visualizer",
     "TaskScheduler": ".scheduler", "ScheduledTask": ".scheduler",
-    "build_repro_manifest": ".reproducibility",
+    "ReproManifestBuilder": ".reproducibility",
     "LLMBackend": ".llm_factory", "OpenAICompatibleBackend": ".llm_factory", "OllamaBackend": ".llm_factory",
 }
 

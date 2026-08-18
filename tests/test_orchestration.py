@@ -263,6 +263,116 @@ class TestProgressHardening:
         assert _relativize_zip_path("Z:\\far\\x.zip") == "Z:\\far\\x.zip"
 
 
+class TestSupplementaryReportsDegradation:
+    """methodology/repro_manifest 写出失败仅降级不拖崩流水线"""
+
+    def test_write_failures_skip_gracefully(self, tmp_path, monkeypatch):
+        import danmaku_analyzer.pipeline as pipeline_module
+        from danmaku_analyzer.pipeline import PipelineOptions
+        from danmaku_analyzer.reporter import Reporter
+
+        class _RaisingManifest:
+            def write(self, output_dir):
+                raise OSError("disk full")
+
+        def raising_methodology(self, metadata, sampling=None):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(pipeline_module, "ReproManifestBuilder", _RaisingManifest)
+        monkeypatch.setattr(Reporter, "generate_methodology", raising_methodology)
+
+        warnings = []
+        reports = pipeline_module._write_supplementary_reports(
+            Reporter(output_dir=str(tmp_path)), {}, PipelineOptions(input_str="BV1x"),
+            lambda stage, msg: warnings.append(msg),
+        )
+        assert reports == {}
+        assert sum("已跳过" in msg for msg in warnings) == 2
+
+    def test_partial_failure_keeps_successful_output(self, tmp_path, monkeypatch):
+        import danmaku_analyzer.pipeline as pipeline_module
+        from danmaku_analyzer.pipeline import PipelineOptions
+        from danmaku_analyzer.reporter import Reporter
+
+        class _RaisingManifest:
+            def write(self, output_dir):
+                raise OSError("disk full")
+
+        monkeypatch.setattr(pipeline_module, "ReproManifestBuilder", _RaisingManifest)
+        reports = pipeline_module._write_supplementary_reports(
+            Reporter(output_dir=str(tmp_path)), {}, PipelineOptions(input_str="BV1x"),
+            lambda stage, msg: None,
+        )
+        assert set(reports) == {"methodology"}
+        assert os.path.exists(reports["methodology"])
+
+
+class TestRestoredItemsBackfill:
+    """调度器终态任务不进执行队列：run() 前必须回填 CompareItem，否则恢复视频缺席聚合"""
+
+    def _make_task(self, raw, status, zip_path):
+        from danmaku_analyzer.scheduler import ScheduledTask
+        return ScheduledTask(input=raw, status=status, bvid="BV1" + raw[-1], zip_path=zip_path)
+
+    def test_terminal_task_with_existing_zip_backfills_item(self, tmp_path):
+        from danmaku_analyzer.pipeline import CompareItem, _restore_recovered_items
+        from danmaku_analyzer.scheduler import TaskScheduler
+
+        zip_path = str(tmp_path / "a.zip")
+        with zipfile.ZipFile(zip_path, 'w') as z:
+            z.writestr("metadata.json", "{}")
+        scheduler = TaskScheduler(state_path=str(tmp_path / "tasks.jsonl"))
+        scheduler.tasks = [self._make_task("BV1a", "done", zip_path)]
+        items = {"BV1a": CompareItem(raw_input="BV1a")}
+
+        _restore_recovered_items(scheduler, items, lambda stage, msg: None)
+
+        assert items["BV1a"].ok and items["BV1a"].zip_path == zip_path
+        assert items["BV1a"].bvid == "BV1a"
+        assert scheduler.tasks[0].status == "done"
+
+    def test_terminal_task_with_missing_zip_reset_to_pending(self, tmp_path):
+        from danmaku_analyzer.pipeline import CompareItem, _restore_recovered_items
+        from danmaku_analyzer.scheduler import TaskScheduler
+
+        scheduler = TaskScheduler(state_path=str(tmp_path / "tasks.jsonl"))
+        scheduler.tasks = [self._make_task("BV1b", "done", str(tmp_path / "gone.zip"))]
+        items = {"BV1b": CompareItem(raw_input="BV1b")}
+
+        _restore_recovered_items(scheduler, items, lambda stage, msg: None)
+
+        assert scheduler.tasks[0].status == "pending"
+        assert not items["BV1b"].ok
+
+    def test_pending_task_untouched(self, tmp_path):
+        from danmaku_analyzer.pipeline import CompareItem, _restore_recovered_items
+        from danmaku_analyzer.scheduler import TaskScheduler
+
+        scheduler = TaskScheduler(state_path=str(tmp_path / "tasks.jsonl"))
+        scheduler.tasks = [self._make_task("BV1c", "pending", "")]
+        items = {"BV1c": CompareItem(raw_input="BV1c")}
+
+        _restore_recovered_items(scheduler, items, lambda stage, msg: None)
+
+        assert scheduler.tasks[0].status == "pending"
+        assert not items["BV1c"].ok
+
+
+class TestXmlEmptyContentSkipped:
+
+    def test_empty_content_danmaku_skipped(self):
+        from danmaku_analyzer.crawler import BilibiliCrawler
+
+        xml = (
+            "<i><d p=\"1.0,1,25,16777215,0,0,abc,0\">正常弹幕</d>"
+            "<d p=\"2.0,1,25,16777215,0,0,def,0\">  </d>"
+            "<d p=\"3.0,1,25,16777215,0,0,ghi,0\"></d></i>"
+        )
+        items = BilibiliCrawler()._parse_danmaku_xml(xml)
+        assert len(items) == 1
+        assert items[0].content == "正常弹幕"
+
+
 class TestFetchAllSourceMarking:
 
     def test_xml_fallback_marked(self, monkeypatch):

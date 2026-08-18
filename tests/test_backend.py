@@ -14,11 +14,7 @@ from danmaku_analyzer.llm_factory import (
     OpenAICompatibleBackend,
     create_backend,
 )
-from danmaku_analyzer.reproducibility import (
-    build_repro_manifest,
-    reproducible_config_snapshot,
-    write_repro_manifest,
-)
+from danmaku_analyzer.reproducibility import ReproManifestBuilder
 
 # MAX_CONTEXT_TOKENS 为分析参数非凭证，故标记清单不含 TOKEN
 _SENSITIVE_MARKERS = ("KEY", "SESSDATA", "JCT", "BUVID", "COOKIE", "BASE_URL")
@@ -27,7 +23,7 @@ _SENSITIVE_MARKERS = ("KEY", "SESSDATA", "JCT", "BUVID", "COOKIE", "BASE_URL")
 class TestReproManifest:
 
     def test_whitelist_excludes_sensitive_and_env_fields(self):
-        snapshot = reproducible_config_snapshot()
+        snapshot = ReproManifestBuilder.reproducible_config_snapshot()
         for key in snapshot:
             assert not any(marker in key.upper() for marker in _SENSITIVE_MARKERS), key
         assert "COMPLEX_LLM_MODEL" in snapshot
@@ -40,7 +36,7 @@ class TestReproManifest:
             assert excluded not in snapshot
 
     def test_manifest_structure(self):
-        manifest = build_repro_manifest()
+        manifest = ReproManifestBuilder().build()
         assert manifest["pipeline_version"]
         assert manifest["python_version"]
         assert manifest["platform"]
@@ -48,7 +44,7 @@ class TestReproManifest:
         assert isinstance(manifest["config_snapshot"], dict)
 
     def test_write_manifest_contains_no_secret_values(self, tmp_path):
-        path = write_repro_manifest(str(tmp_path))
+        path = ReproManifestBuilder().write(str(tmp_path))
         text = open(path, encoding="utf-8").read()
         data = json.loads(text)
         assert data["config_snapshot"]
@@ -168,3 +164,31 @@ tasks:
         path = self._write_yaml(tmp_path, "tasks: []\n")
         with pytest.raises(ValueError, match="非空"):
             _parse_script_tasks(path)
+
+
+class TestScriptExecution:
+    """脚本任务执行路径：单任务失败（含 sys.exit）不中断后续"""
+
+    def test_tasks_run_sequentially_and_failure_isolated(self, monkeypatch):
+        import danmaku_analyzer.cli as cli_module
+
+        executed = []
+
+        async def fake_analyze(input_str, *args, **kwargs):
+            executed.append(("analyze", input_str))
+
+        async def fake_compare(input_list, *args, **kwargs):
+            executed.append(("compare", tuple(input_list)))
+            raise SystemExit(1)
+
+        monkeypatch.setattr(cli_module, "_analyze_async", fake_analyze)
+        monkeypatch.setattr(cli_module, "_compare_async", fake_compare)
+
+        tasks = [
+            {"command": "analyze", "input": "BV1a", "inputs": [], "options": {}},
+            {"command": "compare", "input": "", "inputs": ["BV1b", "BV1c"], "options": {}},
+            {"command": "analyze", "input": "BV1d", "inputs": [], "options": {}},
+        ]
+        with pytest.raises(SystemExit):
+            asyncio.run(cli_module._run_script_async(tasks))
+        assert executed == [("analyze", "BV1a"), ("compare", ("BV1b", "BV1c")), ("analyze", "BV1d")]
