@@ -165,7 +165,8 @@ async def _batch_async(
 _SCRIPT_OPTION_KEYS = {
     "analyze": {"output", "credential", "freq_based", "top_n", "no_cache"},
     "batch": {"output", "credential", "freq_based", "top_n", "no_cache"},
-    "compare": {"output", "reuse", "resume"},
+    "plural": {"output", "reuse", "resume"},
+    "compare": {"output", "reuse", "resume"},  # plural 旧名兼容
 }
 
 
@@ -184,7 +185,7 @@ def _parse_script_tasks(task_file: str) -> List[Dict]:
             raise ValueError(f"第 {idx} 个任务须为映射")
         command = task.get("command")
         if command not in _SCRIPT_OPTION_KEYS:
-            raise ValueError(f"第 {idx} 个任务不支持的命令: {command}（可选 analyze/batch/compare）")
+            raise ValueError(f"第 {idx} 个任务不支持的命令: {command}（可选 analyze/batch/plural）")
         options = task.get("options") or {}
         if not isinstance(options, dict):
             raise ValueError(f"第 {idx} 个任务的 options 须为映射")
@@ -194,7 +195,7 @@ def _parse_script_tasks(task_file: str) -> List[Dict]:
         if command == "analyze":
             if not task.get("input"):
                 raise ValueError(f"第 {idx} 个任务（analyze）缺少 input")
-        elif command in ("batch", "compare"):
+        elif command in ("batch", "plural", "compare"):
             inputs = task.get("inputs")
             if not isinstance(inputs, list) or not inputs:
                 raise ValueError(f"第 {idx} 个任务（{command}）缺少非空 inputs 列表")
@@ -206,7 +207,7 @@ def _parse_script_tasks(task_file: str) -> List[Dict]:
 @cli.command()
 @click.argument('task_file')
 def script(task_file: str):
-    """批量脚本模式：按 YAML 任务文件顺序执行 analyze/batch/compare 任务集，单项失败不中断后续"""
+    """批量脚本模式：按 YAML 任务文件顺序执行 analyze/batch/plural 任务集，单项失败不中断后续"""
     if not os.path.exists(task_file):
         console.print(f"[red]任务文件不存在: {task_file}[/red]")
         sys.exit(1)
@@ -296,8 +297,32 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_plots:
             result = builder.build_from_zips(list(zip_list), output)
         console.print(f"[bold green]语料库聚合完成[/bold green]")
         console.print(f"  聚合表: {result.csv_path}")
+        mode_label = "合并分析（单一分区）" if len(result.tnames) <= 1 else f"比对分析（{len(result.tnames)} 个分区）"
+        console.print(f"  模式: {mode_label}")
 
-        extra_files = [ReproManifestBuilder().write(result.output_dir)]
+        extra_files = []
+        try:
+            extra_files.append(ReproManifestBuilder().write(result.output_dir))
+        except OSError as e:
+            console.print(f"[yellow]repro_manifest.json 写出失败（不影响聚合产物）: {e}[/yellow]")
+
+        comparison = None
+        if get_settings().ENABLE_CORPUS_STATISTICS:
+            from .statistical_validator import StatisticalValidator
+            comparison = StatisticalValidator().corpus_compare(result.videos_csv_path)
+            if comparison.enabled:
+                stats_csv = comparison.to_csv(os.path.join(result.output_dir, "statistical_tests.csv"))
+                extra_files.append(stats_csv)
+                console.print(f"  推断检验: {stats_csv}（{len(comparison.rows)} 行，未校正 p 值）")
+
+        try:
+            from .reporter import Reporter
+            html_path = Reporter(output_dir=result.output_dir).generate_corpus_html_report(result, comparison)
+            extra_files.append(html_path)
+            console.print(f"  HTML 可视化报告: {html_path}")
+        except (OSError, ValueError) as e:
+            console.print(f"[yellow]语料库 HTML 报告生成失败（不影响聚合产物）: {e}[/yellow]")
+
         if with_plots:
             from .corpus_visualizer import CorpusVisualizer
             script_path = CorpusVisualizer().write_script(result.output_dir)
@@ -359,13 +384,13 @@ def export(source_path: str, fmt: str, output: Optional[str]):
         sys.exit(1)
 
 
-@cli.command()
+@cli.command(name="plural")
 @click.argument('input_list', nargs=-1)
 @click.option('--output', '-o', default=None, help='输出目录')
 @click.option('--reuse/--no-reuse', default=True, help='复用过往分析数据（默认复用）')
 @click.option('--resume', is_flag=True, default=False, help='从进度文件（DATA_ROOT/scheduler/progress.jsonl）继续，跳过已完成视频')
-def compare(input_list: tuple, output: Optional[str], reuse: bool, resume: bool):
-    """跨视频比对分析：逐个分析 + 语料库聚合 + 跨分区推断统计（Kruskal-Wallis/逐对 MWU/Cliff's delta）"""
+def plural(input_list: tuple, output: Optional[str], reuse: bool, resume: bool):
+    """跨视频复数分析：同分区自动合并分析（含冷热区配对/历时检验），跨分区执行比对分析（KW/逐对 MWU/Cliff's delta）"""
     if not input_list:
         console.print("[red]请提供至少一个输入（BV号/URL/AV号）[/red]")
         sys.exit(1)
@@ -373,25 +398,29 @@ def compare(input_list: tuple, output: Optional[str], reuse: bool, resume: bool)
     try:
         asyncio.run(_compare_async(list(input_list), output, reuse, resume))
     except Exception as e:
-        console.print(f"[red]比对分析失败: {e}[/red]")
-        logger.error(f"比对分析失败: {e}", exc_info=True)
+        console.print(f"[red]复数分析失败: {e}[/red]")
+        logger.error(f"复数分析失败: {e}", exc_info=True)
         sys.exit(1)
 
 
+# 旧命令名保留为别名，既有脚本与文档引用不受影响
+cli.add_command(plural, name="compare")
+
+
 async def _compare_async(input_list: List[str], output: Optional[str], reuse: bool, resume: bool):
-    """异步批量比对：单项失败不中断批次，最终以退出码反映失败数"""
+    """异步复数分析：单项失败不中断批次，最终以退出码反映失败数"""
     from .pipeline import compare_videos
 
     def rich_progress_callback(stage: str, message: str):
         console.print(f"[cyan]{stage}[/cyan]: {message}")
 
-    console.print(f"[bold]开始比对分析 {len(input_list)} 个视频（复用: {'开' if reuse else '关'}，断点续传: {'开' if resume else '关'}）[/bold]")
+    console.print(f"[bold]开始复数分析 {len(input_list)} 个视频（复用: {'开' if reuse else '关'}，断点续传: {'开' if resume else '关'}）[/bold]")
     result = await compare_videos(
         input_list, reuse=reuse, output_dir=output,
         progress=rich_progress_callback, resume=resume,
     )
 
-    table = Table(title="比对分析逐项结果")
+    table = Table(title="复数分析逐项结果")
     table.add_column("输入", style="cyan", max_width=30, overflow="ellipsis")
     table.add_column("BV号")
     table.add_column("状态")
@@ -405,7 +434,7 @@ async def _compare_async(input_list: List[str], output: Optional[str], reuse: bo
     console.print(table)
 
     if result.summary_csv_path:
-        console.print(f"  比对表: {result.summary_csv_path}")
+        console.print(f"  聚合表: {result.summary_csv_path}")
     if result.statistics_csv_path:
         console.print(f"  推断检验: {result.statistics_csv_path}")
     if result.snapshot_path:
@@ -416,9 +445,9 @@ async def _compare_async(input_list: List[str], output: Optional[str], reuse: bo
 
     fail_count = sum(1 for item in result.items if not item.ok)
     if fail_count:
-        console.print(f"[red]比对分析完成，{fail_count}/{len(result.items)} 个失败[/red]")
+        console.print(f"[red]复数分析完成，{fail_count}/{len(result.items)} 个失败[/red]")
         sys.exit(1)
-    console.print("[bold green]比对分析完成[/bold green]")
+    console.print("[bold green]复数分析完成[/bold green]")
 
 
 @cli.command()

@@ -73,22 +73,39 @@ class AnalysisReportGenerator:
             logger.error(f"语料库报告输入构建失败: {e}")
             return None
 
+        single_partition = self._is_single_partition(videos_csv_path)
         try:
-            report_content = await self._call_llm(self._build_corpus_system_prompt(), user_prompt)
-            logger.info(f"语料库级比较分析报告生成完成，长度 {len(report_content)} 字符")
+            report_content = await self._call_llm(self._build_corpus_system_prompt(single_partition), user_prompt)
+            logger.info(f"语料库级分析报告生成完成，长度 {len(report_content)} 字符")
             return report_content
         except Exception as e:
             logger.error(f"语料库报告生成失败: {e}")
             return None
 
-    def _build_corpus_system_prompt(self) -> str:
-        spec_content = self._load_report_spec()
-        return f"""你是一位资深的社会语言学家，专注于网络语言和社交媒体语料分析。
+    @staticmethod
+    def _is_single_partition(videos_csv_path: str) -> bool:
+        """视频级观测表分区唯一则为合并分析口径（报告聚焦分区内变异而非跨分区比较）"""
+        try:
+            df = pd.read_csv(videos_csv_path, encoding='utf-8-sig', usecols=["tname"])
+        except Exception:
+            return False
+        return df["tname"].dropna().astype(str).str.strip().nunique() <= 1
 
-当前分析对象：B站弹幕跨视频语料库（多个视频、可能跨多个分区的聚合比较数据）。
+    def _build_corpus_system_prompt(self, single_partition: bool = False) -> str:
+        spec_content = self._load_report_spec()
+        if single_partition:
+            task = """当前分析对象：B站同一官方分区内多个视频的弹幕语料库（合并分析）。
+
+你的任务是基于提供的语料库级聚合数据，撰写一份严谨、专业的合并分析报告。
+重点在于该分区弹幕语言的整体特征描写与视频间内部变异（含历时趋势与冷热区情境差异，如数据具备相应维度）的解释，不得虚构跨分区差异；若存在统计检验结果（冷热区配对/跨时段），解读时注明未校正 p 值。"""
+        else:
+            task = """当前分析对象：B站弹幕跨视频语料库（多个视频、可能跨多个分区的聚合比较数据）。
 
 你的任务是基于提供的语料库级聚合数据，撰写一份严谨、专业的跨分区/跨视频比较分析报告。
-重点在于组间差异的语言学解释（而非单视频描述），并明确指出统计检验结论需以 Kruskal-Wallis/Dunn 等后续验证为准，本报告仅为描述性解读。
+重点在于组间差异的语言学解释（而非单视频描述），并明确指出统计检验结论需以 Kruskal-Wallis/Dunn 等后续验证为准，本报告仅为描述性解读。"""
+        return f"""你是一位资深的社会语言学家，专注于网络语言和社交媒体语料分析。
+
+{task}
 
 【重要】你必须严格遵循以下规范文档的要求，确保报告的学术规范性和一致性：
 
@@ -130,14 +147,22 @@ class AnalysisReportGenerator:
             "组级聚合数据": group_rows,
         }
 
-        return f"""请根据以下语料库级结构化数据，撰写跨分区/跨视频的社会语言学比较分析报告：
+        single_partition = (
+            videos_df["tname"].dropna().astype(str).str.strip().nunique() <= 1
+            if "tname" in videos_df.columns else False
+        )
+        task_line = (
+            "撰写同一分区多视频的社会语言学合并分析报告（聚焦分区整体特征与视频间内部变异，不做跨分区比较）"
+            if single_partition else "撰写跨分区/跨视频的社会语言学比较分析报告"
+        )
+        return f"""请根据以下语料库级结构化数据，{task_line}：
 
 ## 输入数据
 ```json
 {json.dumps(data_summary, ensure_ascii=False, indent=2)}
 ```
 
-请按照报告要求，生成一份完整、专业的社会语言学比较分析报告。"""
+请按照报告要求，生成一份完整、专业的社会语言学分析报告。"""
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _call_llm(self, system_prompt: str, user_prompt: str) -> str:

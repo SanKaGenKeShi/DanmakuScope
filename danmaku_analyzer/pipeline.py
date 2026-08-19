@@ -563,17 +563,36 @@ async def _stage_report(
     reports = reporter.generate_reports(
         aggregated, kappa_records=_build_kappa_records(analysis), metadata=video_metadata
     )
+    try:
+        reports["danmaku_raw"] = reporter.generate_raw_danmaku(crawl.danmaku_list)
+    except OSError as e:
+        logger.warning(f"原始弹幕表写出失败，跳过该产出: {e}")
+        progress("报告生成", f"警告：原始弹幕表写出失败（{e}），已跳过")
     reports.update(_write_supplementary_reports(reporter, video_metadata, options, progress))
     progress("报告生成", "报告生成完成")
 
+    llm_report_md = None
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
         progress("LLM报告", "正在生成社会语言学分析报告...")
         llm_report_path = await reporter.generate_llm_analysis_report(aggregated, metadata=video_metadata)
         if llm_report_path:
             reports["sociolinguistic_analysis_report"] = llm_report_path
             progress("LLM报告", "社会语言学分析报告生成完成")
+            try:
+                with open(llm_report_path, encoding='utf-8') as f:
+                    llm_report_md = f.read()
+            except OSError as e:
+                logger.warning(f"LLM 报告回读失败，HTML 报告不嵌入解读文本: {e}")
         else:
             progress("LLM报告", "LLM分析报告生成失败或未启用")
+
+    try:
+        reports["html_report"] = reporter.generate_html_report(aggregated, video_metadata, llm_report_md)
+        progress("报告生成", "HTML 可视化报告生成完成")
+    except OSError as e:
+        logger.warning(f"HTML 可视化报告写出失败，跳过该产出: {e}")
+        progress("报告生成", f"警告：HTML 报告写出失败（{e}），已跳过")
+    reports.update(reporter.zh_reports)
 
     progress("报告打包", "正在打包报告...")
     title_part = _sanitize_zip_filename(crawl.meta.title) or bvid
@@ -699,7 +718,7 @@ def _try_resume_item(item: CompareItem, index: Dict[str, Dict], key: str, progre
     item.zip_path = zip_path
     item.reused = True
     item.ok = True
-    progress("比对分析", f"[{idx}/{total}] 断点续传跳过（进度文件已完成）: {item.bvid or item.raw_input}")
+    progress("复数分析", f"[{idx}/{total}] 断点续传跳过（进度文件已完成）: {item.bvid or item.raw_input}")
     return True
 
 
@@ -743,7 +762,7 @@ async def _process_compare_item(
             _append_progress(raw, bvid, zip_path, reused=True)
             task.status = "reused"
             task.zip_path = _relativize_zip_path(zip_path)
-            progress("比对分析", f"[{idx}/{total}] 复用已有报告: {bvid}")
+            progress("复数分析", f"[{idx}/{total}] 复用已有报告: {bvid}")
             return
 
     analysis = await analyze_video(
@@ -760,7 +779,7 @@ async def _process_compare_item(
     _append_progress(raw, bvid, analysis.zip_path, reused=False)
     task.status = "done"
     task.zip_path = _relativize_zip_path(analysis.zip_path)
-    progress("比对分析", f"[{idx}/{total}] 分析完成: {bvid}")
+    progress("复数分析", f"[{idx}/{total}] 分析完成: {bvid}")
 
 
 def _find_reusable_zip(store: CorpusStore, bvid: str) -> str:
@@ -795,10 +814,10 @@ def _restore_recovered_items(scheduler, items: Dict[str, "CompareItem"], progres
             item.bvid, item.zip_path = task.bvid, zip_path
             item.reused = task.status == "reused"
             item.ok = True
-            progress("比对分析", f"中断恢复跳过（调度器状态已完成）: {task.bvid or task.input}")
+            progress("复数分析", f"中断恢复跳过（调度器状态已完成）: {task.bvid or task.input}")
         else:
             task.status = "pending"
-            progress("比对分析", f"历史产物缺失，重新执行: {task.input}")
+            progress("复数分析", f"历史产物缺失，重新执行: {task.input}")
 
 
 async def compare_videos(
@@ -822,7 +841,7 @@ async def compare_videos(
             items[raw] = CompareItem(raw_input=raw)
     ordered_inputs = list(items.keys())
     if len(ordered_inputs) < len(input_list):
-        progress("比对分析", f"输入含 {len(input_list) - len(ordered_inputs)} 个重复项，已合并为同一任务")
+        progress("复数分析", f"输入含 {len(input_list) - len(ordered_inputs)} 个重复项，已合并为同一任务")
     result.items = [items[raw] for raw in ordered_inputs]
 
     scheduler = TaskScheduler()
@@ -841,15 +860,20 @@ async def compare_videos(
             )
         except Exception as e:
             item.error = str(e)
-            logger.error(f"比对分析单项失败: {task.input} - {e}")
-            progress("比对分析", f"[{idx}/{total}] 分析失败: {task.input} - {e}")
+            logger.error(f"复数分析单项失败: {task.input} - {e}")
+            progress("复数分析", f"[{idx}/{total}] 分析失败: {task.input} - {e}")
             raise
 
     await scheduler.run(_handle_task)
 
     zip_paths = [item.zip_path for item in result.items if item.ok and item.zip_path]
     if not zip_paths:
-        raise RuntimeError("没有任何视频产生有效报告，无法进行比对分析")
+        raise RuntimeError("没有任何视频产生有效报告，无法进行复数分析")
+    # 不同输入可能解析到同一 bvid（URL 与 BV 号并存），聚合前去重避免重复计数与配对错位
+    deduped_paths = list(dict.fromkeys(zip_paths))
+    if len(deduped_paths) < len(zip_paths):
+        progress("复数分析", f"检测到 {len(zip_paths) - len(deduped_paths)} 个重复解析的视频（不同输入指向同一 BV 号），聚合已去重")
+    zip_paths = deduped_paths
 
     progress("语料库聚合", f"开始聚合 {len(zip_paths)} 个视频报告...")
     builder = CorpusBuilder()
@@ -857,6 +881,8 @@ async def compare_videos(
     result.summary_csv_path = build_result.csv_path
     for warning in build_result.warnings:
         progress("语料库聚合", warning)
+    mode_label = "合并分析（单一分区）" if len(build_result.tnames) <= 1 else f"比对分析（{len(build_result.tnames)} 个分区）"
+    progress("语料库聚合", f"识别完成，执行{mode_label}")
 
     settings = get_settings()
     extra_files: List[str] = []
@@ -866,6 +892,7 @@ async def compare_videos(
         logger.warning(f"repro_manifest.json 写出失败，跳过该产出: {e}")
         progress("语料库聚合", f"警告：repro_manifest.json 写出失败（{e}），已跳过")
 
+    comparison = None
     if settings.ENABLE_CORPUS_STATISTICS:
         comparison = StatisticalValidator().corpus_compare(build_result.videos_csv_path)
         if comparison.enabled:
@@ -874,9 +901,17 @@ async def compare_videos(
             result.statistics_csv_path = stats_csv
             progress("语料库聚合", f"推断检验结果已落盘: {STATISTICAL_TESTS_FILENAME}（{len(comparison.rows)} 行，未校正 p 值）")
 
-    if settings.ENABLE_LLM_ANALYSIS_REPORT:
-        from .reporter import Reporter
+    from .reporter import Reporter
 
+    try:
+        html_path = Reporter(output_dir=build_result.output_dir).generate_corpus_html_report(build_result, comparison)
+        extra_files.append(html_path)
+        progress("语料库聚合", "语料库 HTML 可视化报告已生成")
+    except (OSError, ValueError) as e:
+        logger.warning(f"语料库 HTML 报告写出失败，跳过该产出: {e}")
+        progress("语料库聚合", f"警告：语料库 HTML 报告写出失败（{e}），已跳过")
+
+    if settings.ENABLE_LLM_ANALYSIS_REPORT:
         corpus_metadata = builder.build_snapshot_metadata(build_result)
         llm_report_path = await Reporter(output_dir=build_result.output_dir).generate_corpus_analysis_report(
             build_result.csv_path, build_result.videos_csv_path, corpus_metadata

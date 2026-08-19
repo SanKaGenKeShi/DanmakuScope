@@ -1,11 +1,13 @@
 """编排层纯单测：ZIP 打包/文件名清洗/进度文件/缓存/偏好注入/简单路降级/温度校验/.env 优先级（全部离线）"""
 import asyncio
+import io
 import json
 import os
 import subprocess
 import sys
 import zipfile
 
+import pandas as pd
 import pytest
 
 from danmaku_analyzer.cache_manager import CacheManager
@@ -448,7 +450,19 @@ class TestAnalyzeVideoContract:
         ))
         assert result.zip_valid and os.path.exists(result.zip_path)
         with zipfile.ZipFile(result.zip_path) as z:
-            assert "metadata.json" in z.namelist()
+            names = z.namelist()
+            assert "metadata.json" in names
             meta = json.loads(z.read("metadata.json"))
+            # 原始弹幕全量入包（无开关）与中文版双产出随包
+            assert "danmaku_raw.csv" in names
+            assert "原始弹幕.csv" in names
+            assert "情感分布表.csv" in names
+            # HTML 可视化报告（离线单文件）与中文副本随包
+            assert "report.html" in names
+            assert "分析报告.html" in names
+            html_content = z.read("report.html").decode("utf-8")
+            raw_df = pd.read_csv(io.BytesIO(z.read("danmaku_raw.csv")), encoding='utf-8-sig')
         assert meta["bvid"] == "BV1uu4y1s7TB"
         assert meta["danmaku_source"] == "protobuf"
+        assert len(raw_df) == 40
+        assert "<script" not in html_content.lower() and "https://" not in html_content

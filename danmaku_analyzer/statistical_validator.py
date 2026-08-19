@@ -342,16 +342,89 @@ class StatisticalValidator:
             })
         return rows
 
-    def corpus_compare(self, csv_path: str, groupby_col: str = "tname") -> ComparisonResult:
-        """语料库级跨分区推断编排：消费视频级观测表（勿用组级汇总表），
-        分区视频数 < CORPUS_MIN_VIDEOS_PER_PARTITION 标 insufficient_sample 跳过，
-        有效分组 < 2 输出空结果并告警；仅受 ENABLE_CORPUS_STATISTICS 控制"""
+    def zone_paired_compare(self, csv_path: str) -> List[Dict]:
+        """冷热区视频内配对 Wilcoxon 符号秩检验（单分区合并模式的情境变异轴）：
+        每视频提供热/冷区一对观测，配对数 < CORPUS_MIN_VIDEOS_PER_PARTITION 或无双区观测返回空"""
+        df = pd.read_csv(csv_path, encoding='utf-8-sig')
+        if "zone_type" not in df.columns or "bvid" not in df.columns:
+            return []
+        zone = df["zone_type"].astype(str)
+        # 防御重复观测（同 bvid 同区多行）：保留首条，避免配对错位与样本量虚高
+        hot = df[zone == "hot_zone"].set_index("bvid")
+        hot = hot[~hot.index.duplicated(keep="first")]
+        cold = df[zone == "cold_zone"].set_index("bvid")
+        cold = cold[~cold.index.duplicated(keep="first")]
+        paired_bvids = sorted(set(hot.index) & set(cold.index))
+        min_pairs = get_settings().CORPUS_MIN_VIDEOS_PER_PARTITION
+        if len(paired_bvids) < min_pairs:
+            if paired_bvids:
+                logger.warning(f"冷热区配对数不足（{len(paired_bvids)} < {min_pairs}），跳过配对检验")
+            return []
+
+        rows: List[Dict] = []
+        for metric in SCALAR_FIELDS:
+            if metric not in hot.columns or metric not in cold.columns:
+                continue
+            a = pd.to_numeric(hot.loc[paired_bvids, metric], errors="coerce")
+            b = pd.to_numeric(cold.loc[paired_bvids, metric], errors="coerce")
+            mask = a.notna() & b.notna()
+            a, b = a[mask], b[mask]
+            if len(a) < min_pairs:
+                continue
+            if (a.values == b.values).all():
+                statistic, p_value = len(a) * len(a) / 2, 1.0
+                note = UNCORRECTED_P_NOTE + "；全部配对差为零，检验退化"
+            else:
+                try:
+                    statistic, p_value = stats.wilcoxon(a.values, b.values)
+                    note = UNCORRECTED_P_NOTE
+                except ValueError:
+                    statistic, p_value = len(a) * len(a) / 2, 1.0
+                    note = UNCORRECTED_P_NOTE + "；非零差异不足，检验退化"
+            delta = self.cliff_delta(a.tolist(), b.tolist())
+            rows.append({
+                "metric": metric,
+                "test_type": "Wilcoxon 符号秩（配对）",
+                "group1": "hot_zone",
+                "group2": "cold_zone",
+                "n1": len(a),
+                "n2": len(b),
+                "statistic": round(float(statistic), 4),
+                "p_value": round(float(p_value), 6),
+                "effect_size": round(delta, 4),
+                "effect_magnitude": self._cliff_delta_magnitude(delta),
+                "note": note,
+            })
+        if rows:
+            logger.info(f"冷热区配对检验完成: {len(paired_bvids)} 对视频观测，{len(rows)} 行结果（未校正 p 值）")
+        return rows
+
+    def corpus_compare(self, csv_path: str, groupby_col: Optional[str] = None) -> ComparisonResult:
+        """语料库级推断编排：消费视频级观测表（勿用组级汇总表）。
+        分组键自动分流：多分区按 tname 比对；单分区且开启时间分桶时按 time_period 历时比对；
+        单分区另补冷热区视频内配对检验（情境变异轴）；组内视频数 < CORPUS_MIN_VIDEOS_PER_PARTITION
+        标 insufficient_sample 跳过；无任何可执行检验时输出注记行；仅受 ENABLE_CORPUS_STATISTICS 控制"""
         settings = get_settings()
         if not settings.ENABLE_CORPUS_STATISTICS:
             logger.info("语料库级推断统计未启用（ENABLE_CORPUS_STATISTICS=False），跳过 corpus_compare")
             return ComparisonResult(rows=[], enabled=False)
 
         df = pd.read_csv(csv_path, encoding='utf-8-sig')
+        if "tname" not in df.columns:
+            raise ValueError(f"观测表缺少分组列 tname: {csv_path}")
+
+        if groupby_col is None:
+            tnames = df["tname"].dropna().astype(str).str.strip()
+            tnames = tnames[tnames != ""]
+            single_partition = tnames.nunique() <= 1
+            temporal_usable = (
+                "time_period" in df.columns
+                and df["time_period"].notna().any()
+                and (df["time_period"].astype(str).str.strip() != "").any()
+                and df.loc[df["time_period"].notna(), "time_period"].astype(str).nunique() >= 2
+            )
+            groupby_col = "time_period" if (single_partition and temporal_usable) else "tname"
+
         if groupby_col not in df.columns:
             raise ValueError(f"观测表缺少分组列 {groupby_col}: {csv_path}")
         df = df[df[groupby_col].notna() & (df[groupby_col].astype(str).str.strip() != "")]
@@ -359,13 +432,13 @@ class StatisticalValidator:
         min_videos = settings.CORPUS_MIN_VIDEOS_PER_PARTITION
         counts = df.groupby(groupby_col).size()
         valid = sorted(counts[counts >= min_videos].index.astype(str).tolist())
-        if len(valid) < 2:
-            logger.warning(f"有效分组不足（{len(valid)} < 2，门槛：每分区视频数 >= {min_videos}），跳过语料库级推断检验，输出空 statistical_tests.csv")
-            return ComparisonResult(rows=[])
 
         rows: List[Dict] = []
-        for name in sorted(counts.index.astype(str)):
-            n = int(counts[name])
+        axis_label = "时段" if groupby_col == "time_period" else "分区"
+        for raw_name, count in sorted(counts.items(), key=lambda kv: str(kv[0])):
+            # 时段列 CSV 往返后可能为数值 dtype，统一转字符串避免键查错位
+            name = str(raw_name)
+            n = int(count)
             sufficient = n >= min_videos
             rows.append({
                 "metric": "",
@@ -381,23 +454,38 @@ class StatisticalValidator:
                 "note": "sample_sufficient" if sufficient else f"insufficient_sample（视频数 {n} < {min_videos}，不参与检验）",
             })
 
-        sub = df[df[groupby_col].astype(str).isin(valid)]
-        for metric in SCALAR_FIELDS:
-            if metric not in sub.columns:
-                continue
-            groups: Dict[str, List[float]] = {}
-            for name in valid:
-                values = pd.to_numeric(sub.loc[sub[groupby_col].astype(str) == name, metric], errors='coerce').dropna().tolist()
-                if len(values) >= 2:
-                    groups[name] = values
-            if len(groups) < 2:
-                continue
-            kw_row = self.kruskal_wallis_test(groups, metric)
-            if kw_row:
-                rows.append(kw_row)
-            rows.extend(self.pairwise_mann_whitney(groups, metric))
+        if len(valid) >= 2:
+            sub = df[df[groupby_col].astype(str).isin(valid)]
+            for metric in SCALAR_FIELDS:
+                if metric not in sub.columns:
+                    continue
+                groups: Dict[str, List[float]] = {}
+                for name in valid:
+                    values = pd.to_numeric(sub.loc[sub[groupby_col].astype(str) == name, metric], errors='coerce').dropna().tolist()
+                    if len(values) >= 2:
+                        groups[name] = values
+                if len(groups) < 2:
+                    continue
+                kw_row = self.kruskal_wallis_test(groups, metric)
+                if kw_row:
+                    rows.append(kw_row)
+                rows.extend(self.pairwise_mann_whitney(groups, metric))
+            logger.info(f"语料库级推断检验完成: 按{axis_label}分组 {len(valid)} 个有效组，{len(rows)} 行结果（未校正 p 值）")
+        else:
+            logger.warning(f"有效{axis_label}不足（{len(valid)} < 2，门槛：每组视频数 >= {min_videos}），未执行组间检验")
 
-        logger.info(f"语料库级推断检验完成: {len(valid)} 个有效分区，{len(rows)} 行结果（未校正 p 值）")
+        # 单分区合并模式：补冷热区视频内配对检验（多分区场景避免跨分区混杂不执行）
+        if df["tname"].astype(str).str.strip().nunique() <= 1:
+            paired_rows = self.zone_paired_compare(csv_path)
+            rows.extend(paired_rows)
+            if len(valid) < 2 and not paired_rows:
+                rows.append({
+                    "metric": "", "test_type": "note", "group1": "", "group2": "",
+                    "n1": "", "n2": "", "statistic": "", "p_value": "",
+                    "effect_size": "", "effect_magnitude": "",
+                    "note": "单一分区且未启用时间分桶/冷热区双区保留，无可用比较轴，未执行推断检验",
+                })
+
         return ComparisonResult(rows=rows)
 
 

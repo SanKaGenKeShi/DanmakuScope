@@ -16,7 +16,7 @@ from textual.widgets import Button, Input, Label, Static, Switch, TextArea
 from ..utils.logger import get_logger
 from ..prefs import apply_saved_prefs, load_prefs, save_prefs
 from .i18n import i18n
-from .screens import SettingsScreen
+from .screens import FirstRunWizardScreen, SettingsScreen
 from .themes import CUSTOM_THEMES, DEFAULT_THEME
 
 logger = get_logger(__name__)
@@ -84,11 +84,11 @@ def _logo_text() -> str:
 
 
 class CompareRequested(Message):
-    """比对输入区按下 Alt+Enter 时触发"""
+    """复数分析输入区按下 Alt+Enter 时触发"""
 
 
 class CompareArea(TextArea):
-    """多行比对输入区：Enter 换行，Alt+Enter 触发比对分析"""
+    """多行复数分析输入区：Enter 换行，Alt+Enter 触发复数分析"""
 
     async def _on_key(self, event: events.Key) -> None:
         if event.key == "alt+enter":
@@ -413,6 +413,8 @@ class DanmakuTUI(App):
         self._tui_log_sink_id = logger.add(self._tui_log_sink, level="INFO")
         self._animate_home_entrance()
         self.run_worker(self._preload_heavy_modules(), exclusive=False)
+        if not load_prefs().get("wizard_completed"):
+            self.push_screen(FirstRunWizardScreen())
 
     async def _preload_heavy_modules(self) -> None:
         """后台线程预载重依赖：bilibili_api 全程惰性导入（首开设置页才触发，冷导入约 1.2s），
@@ -553,7 +555,7 @@ class DanmakuTUI(App):
         self.action_compare()
 
     def _set_mode(self, mode: str) -> None:
-        """切换主页/个体/比对/实时日志四种模式：内容区与底部输入区互斥显示，输出面板各自独立"""
+        """切换主页/个体/复数/实时日志四种模式：内容区与底部输入区互斥显示，输出面板各自独立"""
         self._mode = mode
         self.query_one("#bottom-bar").styles.display = "block" if mode == "single" else "none"
         self.query_one("#compare-controls").styles.display = "block" if mode == "compare" else "none"
@@ -693,7 +695,7 @@ class DanmakuTUI(App):
                     self._log_lines([f"  {i18n.t('compare.snapshot_invalid')}"], panel)
             self.notify(i18n.t("compare.done"), severity="information")
         except Exception as e:
-            logger.error(f"TUI 比对分析失败: {e}", exc_info=True)
+            logger.error(f"TUI 复数分析失败: {e}", exc_info=True)
             self._log_lines([f"✘ {e}"], panel)
             self.notify(i18n.t("compare.failed", error=e), severity="error")
         finally:
@@ -706,7 +708,7 @@ class DanmakuTUI(App):
         self._visible_panel.clear()
 
     def action_cancel_task(self) -> None:
-        """中断当前分析/比对任务（取消后台 worker，取消信号经 asyncio 传播至 HTTP 请求层）"""
+        """中断当前分析/复数分析任务（取消后台 worker，取消信号经 asyncio 传播至 HTTP 请求层）"""
         worker = self._task_worker
         if worker is None or not worker.is_running:
             self.notify(i18n.t("notify.cancel_none"), severity="warning")

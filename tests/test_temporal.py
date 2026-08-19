@@ -157,9 +157,25 @@ class TestTemporalStatisticsIntegration:
 
         comparison = StatisticalValidator().corpus_compare(result.videos_csv_path)
         df = comparison.to_dataframe()
-        # 有效分区仅 1 个（音乐 1 视频 < 3）→ 拒绝检验，输出空 CSV 并告警
-        assert df.empty
+        # 多分区场景仍按 tname 分组：游戏（3 视频）足够、音乐（1 视频）不足；有效组 < 2 未执行组间检验，样本状态行照常输出
+        assert not df.empty
+        assert (df["test_type"] == "sample_status").all()
+        status = df.set_index("group1")["note"]
+        assert status["游戏"] == "sample_sufficient"
+        assert "insufficient_sample" in status["音乐"]
         assert list(df.columns) == [
             "metric", "test_type", "group1", "group2", "n1", "n2",
             "statistic", "p_value", "effect_size", "effect_magnitude", "note",
         ]
+
+
+class TestTemporalObservationColumn:
+
+    def test_videos_csv_has_time_period_column(self, tmp_path, tmp_store, temporal_on):
+        make_fake_zip(tmp_path, "BV1g0", "游戏", pubdate="2024-05-01T00:00:00", density=0.3)
+        zip_path = str(next(tmp_path.glob("*.zip")))
+        result = CorpusBuilder().build_from_zips([zip_path], output_dir=str(tmp_path / "out"))
+        df = pd.read_csv(result.videos_csv_path, encoding='utf-8-sig')
+        assert "time_period" in df.columns
+        # CSV 往返后年份桶可能被解析为数值 dtype，统一按字符串比较
+        assert str(df.iloc[0]["time_period"]) == "2024"

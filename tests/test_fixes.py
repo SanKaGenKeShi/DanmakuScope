@@ -155,6 +155,23 @@ class TestWriteLlmEnv:
         assert "SIMPLE_LLM_TIMEOUT=90.0" in text
 
 
+class TestDeletePref:
+
+    def test_delete_existing_key_rewrites_file(self, tmp_path, monkeypatch):
+        from danmaku_analyzer.config import get_settings
+        from danmaku_analyzer.prefs import delete_pref, load_prefs, save_prefs
+        monkeypatch.setattr(get_settings(), "DATA_ROOT", str(tmp_path))
+        save_prefs({"wizard_completed": True, "theme": "nord"})
+        assert delete_pref("wizard_completed") is True
+        assert load_prefs() == {"theme": "nord"}
+
+    def test_delete_missing_key_returns_false(self, tmp_path, monkeypatch):
+        from danmaku_analyzer.config import get_settings
+        from danmaku_analyzer.prefs import delete_pref
+        monkeypatch.setattr(get_settings(), "DATA_ROOT", str(tmp_path))
+        assert delete_pref("wizard_completed") is False
+
+
 # ========== 问题3+4：死参数移除 + tenacity 重试 ==========
 
 class TestReportGeneratorRetry:
@@ -412,3 +429,12 @@ class TestPromptTemplateCompleteness:
     def test_prompt_version_bumped(self):
         from danmaku_analyzer.llm_config import get_llm_settings
         assert get_llm_settings().PROMPT_VERSION != "v2.2.0"
+
+
+class TestPluralCommand:
+
+    def test_plural_registered_with_compare_alias(self):
+        from danmaku_analyzer.cli import cli
+        assert "plural" in cli.commands
+        assert "compare" in cli.commands
+        assert cli.commands["compare"] is cli.commands["plural"]

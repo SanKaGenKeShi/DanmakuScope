@@ -1,10 +1,12 @@
 """
-报告生成器模块 - 导出交叉表 + 热力图数据 + kappa_ready.csv
+报告生成器模块 - 导出交叉表 + 热力图数据 + kappa_ready.csv + 原始弹幕
+聚合表同步写出中文版（文件名与列头翻译），英文版保持契约名供程序回读
 """
 
 import os
 import json
 import csv
+import shutil
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -31,6 +33,63 @@ _KAPPA_LLM_FIELDS = [
     ("orthography_confidence", "orthography", "confidence", 0),
 ]
 
+# 中文版产出映射：英文契约文件名 → 中文文件名（未登记的表不写中文版）
+_ZH_TABLE_FILENAMES = {
+    "table_lexical_by_partition.csv": "词类统计表.csv",
+    "table_orthography.csv": "正字法统计表.csv",
+    "table_sentence_function.csv": "句类分布表.csv",
+    "table_emotion.csv": "情感分布表.csv",
+    "table_interaction_type.csv": "互动类型分布表.csv",
+    "table_consensus_stats.csv": "共识统计表.csv",
+    "danmaku_raw.csv": "原始弹幕.csv",
+}
+
+_ZH_COLUMN_LABELS = {
+    "tname": "分区",
+    "zone_type": "冷热区",
+    "danmaku_count": "弹幕数",
+    "avg_word_length": "平均词长",
+    "content_word_density": "实词密度",
+    "punctuation_emoji_rate": "标点与表情率",
+    "cooperative_principle_violation_rate": "合作原则违背率",
+    "high_consensus_rate": "高共识率",
+    "medium_consensus_rate": "中共识率",
+    "low_consensus_rate": "低共识率",
+    "avg_weight_multiplier": "平均权重系数",
+    "high_consensus_ci_lower": "高共识率置信下限",
+    "high_consensus_ci_upper": "高共识率置信上限",
+    "high_consensus_ci_status": "置信区间状态",
+    "uid_hash": "用户哈希",
+    "content": "弹幕内容",
+    "time_sec": "时间点(秒)",
+    "identity_type": "身份类型",
+}
+
+_ZH_LABEL_VALUES = {
+    "positive": "正面", "neutral": "中性", "negative": "负面",
+    "check_in": "打卡报到", "identity_claim": "身份声明", "mocking": "调侃嘲讽",
+    "info_request": "信息询问", "expression": "情感表达", "other": "其他",
+    "assertion": "陈述", "question": "疑问", "exclamation": "感叹",
+    "directive": "祈使", "fragment": "碎片",
+    "standard": "规范书写", "community_variant": "社区变体", "non_standard_typo": "非规范错字",
+    "hot_zone": "热区", "cold_zone": "冷区",
+}
+
+_ZH_HARD_METRICS = {
+    "uppercase_abbr_per_1000": "每千字大写缩写数",
+    "number_symbol_per_1000": "每千字数字表意串数",
+    "emoticon_per_1000": "每千字颜文字数",
+}
+
+_ZH_POS_FLAGS = {
+    "n": "名词", "v": "动词", "a": "形容词", "d": "副词", "r": "代词",
+    "m": "数词", "q": "量词", "p": "介词", "c": "连词", "u": "助词",
+    "f": "方位词", "s": "处所词", "t": "时间词", "b": "区别词", "z": "状态词",
+    "i": "成语", "j": "简称", "l": "习用语", "e": "叹词", "y": "语气词",
+    "o": "拟声词", "h": "前接成分", "k": "后接成分", "x": "非语素字",
+    "w": "标点", "eng": "外语", "un": "未知词",
+}
+
 
 class Reporter:
     
@@ -38,6 +97,7 @@ class Reporter:
         self.settings = get_settings()
         self.output_dir = self.settings.resolve_data_path(output_dir or self.settings.OUTPUT_DIR)
         os.makedirs(self.output_dir, exist_ok=True)
+        self.zh_reports: Dict[str, str] = {}
     
     def generate_reports(
         self, 
@@ -61,6 +121,7 @@ class Reporter:
             reports["kappa_ready"] = self._generate_kappa_ready(kappa_records)
         
         reports["metadata"] = self._generate_metadata(aggregated_data, metadata)
+        reports.update(self.zh_reports)
         
         logger.info(f"报告生成完成，共 {len(reports)} 个文件")
         return reports
@@ -117,18 +178,53 @@ class Reporter:
     ) -> Optional[str]:
         """语料库级 LLM 比较分析报告（与单视频报告共用同一生成入口）"""
         from .report_generator import AnalysisReportGenerator
-        
+    
         report_gen = AnalysisReportGenerator()
         return await self._run_llm_report(
             lambda: report_gen.generate_corpus_report(summary_csv_path, videos_csv_path, corpus_metadata),
             "corpus_analysis_report.md", "语料库LLM分析报告"
         )
     
+    def generate_corpus_html_report(self, build_result, comparison=None) -> str:
+        """语料库级 HTML 可视化报告（corpus_report.html），渲染委派 HtmlReportGenerator"""
+        from .html_report import HtmlReportGenerator
+    
+        summary_df = pd.read_csv(build_result.csv_path, encoding='utf-8-sig')
+        videos_df = pd.read_csv(build_result.videos_csv_path, encoding='utf-8-sig')
+        tests_df = comparison.to_dataframe() if comparison is not None and comparison.rows else None
+        metadata = {
+            "tnames": list(build_result.tnames),
+            "video_count": int(videos_df["bvid"].nunique()) if "bvid" in videos_df.columns else 0,
+            "total_danmaku": int(videos_df["danmaku_count"].sum()) if "danmaku_count" in videos_df.columns else 0,
+        }
+        return HtmlReportGenerator(self.output_dir).write_corpus(summary_df, tests_df, metadata)
+    
     def generate_methodology(self, metadata: Dict, sampling: Optional[Dict] = None) -> str:
         """方法论描述（methodology.md）随报告入包，渲染委派 MethodologyGenerator"""
         from .methodology import MethodologyGenerator
 
         return MethodologyGenerator(self.output_dir).write(metadata, sampling)
+
+    def generate_html_report(
+        self,
+        aggregated_data: List[AggregatedData],
+        metadata: Optional[Dict] = None,
+        llm_report_md: Optional[str] = None,
+    ) -> str:
+        """HTML 可视化报告（离线单文件，内联 CSS/SVG），渲染委派 HtmlReportGenerator；同名中文副本仅供浏览"""
+        from .html_report import HTML_REPORT_FILENAME, HtmlReportGenerator
+
+        enriched = dict(metadata or {})
+        enriched.setdefault("prompt_version", get_llm_settings().PROMPT_VERSION)
+        enriched.setdefault("generated_at", datetime.now().isoformat(timespec='seconds'))
+        path = HtmlReportGenerator(self.output_dir).write(aggregated_data, enriched, llm_report_md)
+        try:
+            zh_path = os.path.join(self.output_dir, "分析报告.html")
+            shutil.copyfile(path, zh_path)
+            self.zh_reports[f"{os.path.splitext(HTML_REPORT_FILENAME)[0]}_zh"] = zh_path
+        except OSError as e:
+            logger.warning(f"HTML 报告中文副本写出失败（主报告不受影响）: {e}")
+        return path
 
     def export_formatted(self, source_path: str, fmt: str) -> str:
         """多格式导出（latex/apa），格式化逻辑委派 Exporter"""
@@ -141,6 +237,39 @@ class Reporter:
         filepath = os.path.join(self.output_dir, filename)
         df.to_csv(filepath, index=False, encoding='utf-8-sig')
         logger.info(f"{description}已保存: {filepath}")
+        self._write_zh_twin(df, filename, description)
+        return filepath
+
+    def _write_zh_twin(self, df: pd.DataFrame, filename: str, description: str) -> None:
+        """中文版双写：英文契约版保程序回读，中文版翻译列头供人工阅读；失败仅告警不影响主产出"""
+        zh_filename = _ZH_TABLE_FILENAMES.get(filename)
+        if not zh_filename:
+            return
+        zh_path = os.path.join(self.output_dir, zh_filename)
+        try:
+            zh_df = df.rename(columns=_translate_column)
+            zh_df.to_csv(zh_path, index=False, encoding='utf-8-sig')
+        except OSError as e:
+            logger.warning(f"{description}中文版写出失败（英文版不受影响）: {e}")
+            return
+        self.zh_reports[f"{os.path.splitext(filename)[0]}_zh"] = zh_path
+
+    def generate_raw_danmaku(self, danmaku_list: list) -> str:
+        """全量原始弹幕（未清洗）入包，支撑论文语料附录与复核；XML 兜底样本的截断性由 metadata 的 danmaku_source 标注"""
+        rows = [
+            {
+                "uid_hash": item.uid_hash,
+                "content": item.content,
+                "time_sec": item.time_sec,
+                "identity_type": item.identity_type,
+            }
+            for item in danmaku_list
+        ]
+        df = pd.DataFrame(rows, columns=["uid_hash", "content", "time_sec", "identity_type"])
+        filepath = os.path.join(self.output_dir, "danmaku_raw.csv")
+        df.to_csv(filepath, index=False, encoding='utf-8-sig')
+        logger.info(f"原始弹幕表已保存: {filepath}（{len(df)} 条）")
+        self._write_zh_twin(df, "danmaku_raw.csv", "原始弹幕表")
         return filepath
     
     def _generate_lexical_table(self, data: List[AggregatedData]) -> str:
@@ -348,4 +477,21 @@ class Reporter:
         
         logger.info(f"元数据已保存: {filepath}")
         return filepath
+
+
+def _translate_column(column: str) -> str:
+    """列头翻译：固定列直查，动态列按前缀展开（pos_/hard_/soft_），未命中保留原名不致断链"""
+    if column in _ZH_COLUMN_LABELS:
+        return _ZH_COLUMN_LABELS[column]
+    if column.startswith("pos_"):
+        flag = column[4:]
+        # 精确匹配：前缀匹配会把未知旗标误并入已知词性（zzz → 状态词zz）
+        return f"词性_{_ZH_POS_FLAGS.get(flag, flag)}"
+    if column.startswith("syllable_"):
+        return f"音节_{_ZH_LABEL_VALUES.get(column[9:], column[9:])}"
+    if column.startswith("hard_"):
+        return _ZH_HARD_METRICS.get(column[5:], column)
+    if column.startswith("soft_"):
+        return f"LLM判定_{_ZH_LABEL_VALUES.get(column[5:], column[5:])}"
+    return _ZH_LABEL_VALUES.get(column, column)
 

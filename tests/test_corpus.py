@@ -517,3 +517,86 @@ class TestCorpusReportPrompt:
         assert "语料库概况" in prompt
         assert "组级聚合数据" in prompt
         assert "BV1r1" in prompt and "BV1r2" in prompt
+
+
+class TestMergedRawDanmaku:
+
+    @staticmethod
+    def _zip_with_raw(path, bvid, contents):
+        raw = pd.DataFrame([
+            {"uid_hash": f"u{i}", "content": c, "time_sec": float(i), "identity_type": "real_user"}
+            for i, c in enumerate(contents)
+        ])
+        buf = StringIO()
+        raw.to_csv(buf, index=False, encoding='utf-8-sig')
+        with zipfile.ZipFile(path, 'w') as z:
+            z.writestr("metadata.json", json.dumps({"bvid": bvid, "tname": "游戏", "partitions": ["游戏"]}))
+            z.writestr("danmaku_raw.csv", buf.getvalue().encode('utf-8-sig'))
+        return str(path)
+
+    def test_merged_raw_table_combines_with_bvid(self, tmp_path):
+        p1 = self._zip_with_raw(tmp_path / "a.zip", "BV1a", ["弹幕一", "弹幕二"])
+        p2 = self._zip_with_raw(tmp_path / "b.zip", "BV1b", ["弹幕三"])
+        path = CorpusBuilder()._write_merged_raw_danmaku([p1, p2], str(tmp_path))
+        df = pd.read_csv(path, encoding='utf-8-sig')
+        assert df.columns[0] == "bvid"
+        assert set(df["bvid"]) == {"BV1a", "BV1b"}
+        assert len(df) == 3
+
+    def test_missing_raw_tables_returns_none(self, tmp_path):
+        path = tmp_path / "no_raw.zip"
+        with zipfile.ZipFile(path, 'w') as z:
+            z.writestr("metadata.json", json.dumps({"bvid": "BV1x", "tname": "游戏"}))
+        assert CorpusBuilder()._write_merged_raw_danmaku([str(path)], str(tmp_path)) is None
+
+
+class TestCorpusCliOutputs:
+    """corpus 命令产出对齐复数分析：推断统计 + 语料库 HTML 报告入包"""
+
+    @staticmethod
+    def _fake_zip(path, bvid, tname):
+        metadata = {
+            "generated_at": "2026-08-19T12:00:00", "prompt_version": "v2.3.0",
+            "total_videos": 1, "total_danmaku": 100, "total_segments": 1,
+            "partitions": [tname], "bvid": bvid, "title": f"测试-{bvid}",
+            "tname": tname, "tags": [], "pubdate": "2025-03-15T10:00:00",
+            "view_count": 1000, "danmaku_count": 100, "pipeline_version": "0.3.7-beta",
+        }
+
+        def table(rows):
+            buf = StringIO()
+            pd.DataFrame(rows).to_csv(buf, index=False, encoding='utf-8-sig')
+            return buf.getvalue().encode('utf-8-sig')
+
+        with zipfile.ZipFile(path, 'w') as z:
+            z.writestr("metadata.json", json.dumps(metadata, ensure_ascii=False))
+            z.writestr("table_lexical_by_partition.csv", table([{
+                "tname": tname, "zone_type": "hot_zone", "danmaku_count": 100,
+                "avg_word_length": 2.0, "content_word_density": 0.5, "punctuation_emoji_rate": 0.1,
+            }]))
+            z.writestr("table_consensus_stats.csv", table([{
+                "tname": tname, "zone_type": "hot_zone", "danmaku_count": 100,
+                "high_consensus_rate": 0.6, "medium_consensus_rate": 0.2,
+                "low_consensus_rate": 0.2, "avg_weight_multiplier": 0.96,
+            }]))
+            z.writestr("table_emotion.csv", table([{
+                "tname": tname, "zone_type": "hot_zone", "danmaku_count": 100,
+                "cooperative_principle_violation_rate": 0.1,
+            }]))
+        return str(path)
+
+    def test_corpus_command_produces_stats_and_html(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+        from danmaku_analyzer.cli import cli
+        monkeypatch.setattr(get_settings(), "ENABLE_LLM_ANALYSIS_REPORT", False)
+        monkeypatch.setattr(get_settings(), "DATA_ROOT", str(tmp_path / "data_root"))
+        zip_paths = [self._fake_zip(tmp_path / f"[BV1x{i}]t.zip", f"BV1x{i}", "游戏") for i in range(3)]
+        result = CliRunner().invoke(cli, ["corpus", *zip_paths, "-o", str(tmp_path / "out")])
+        assert result.exit_code == 0, result.output
+        out = tmp_path / "out"
+        # 散落文件打包校验通过后按设计清理，产物以快照 ZIP 内条目为准
+        snapshot = next(out.glob("*.zip"), None)
+        assert snapshot is not None
+        with zipfile.ZipFile(snapshot) as z:
+            names = z.namelist()
+        assert "statistical_tests.csv" in names and "corpus_report.html" in names

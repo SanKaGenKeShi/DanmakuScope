@@ -75,6 +75,14 @@ _CORPUS_DEFAULTS = {
 
 # 分析报告 LLM 未配置时界面直接展示配置现值（占位默认值），不再预填复杂任务值
 
+# 专家级参数在参数说明表中的条目名（与 expert-only 控件分级保持一致，基础模式下不展示）
+_EXPERT_HELP_KEYS = {
+    "切分模式", "最小段样本数", "抽样误差 MOE", "置信水平",
+    "LLM 并发上限", "LLM 辅助分词", "分词触发长度", "微语境窗口", "微语境最大 token",
+    "每分区最少视频数", "冷热区策略", "按发布时间分桶", "分桶粒度", "调度器并发数", "可视化脚本后端",
+    "双路推理", "JSD 低阈值", "JSD 中阈值", "报告生成温度", "请求超时",
+}
+
 # sessdata → (uname, mid) 会话内缓存，避免每次打开设置页都请求 nav 接口
 _ACCOUNT_CACHE: dict[str, tuple[str, str]] = {}
 
@@ -174,6 +182,12 @@ class SettingsScreen(ModalScreen[bool]):
         padding: 1 0;
     }
 
+    #mode-hint {
+        width: 1fr;
+        padding: 1 0;
+        color: $foreground 60%;
+    }
+
     #tab-llm .setting-row Input {
         width: 50;
     }
@@ -227,7 +241,19 @@ class SettingsScreen(ModalScreen[bool]):
             "complex": llm_cfg.COMPLEX_LLM_ENABLE_THINKING,
             "report": llm_cfg.ANALYSIS_REPORT_LLM_ENABLE_THINKING,
         }
+        self._ui_mode = str(load_prefs().get("ui_mode", "basic"))
         with Vertical(id="settings-dialog"):
+            with Static(classes="setting-row"):
+                yield Label(i18n.t("settings.ui_mode"))
+                yield Button(
+                    i18n.t("settings.mode_basic"), id="btn-mode-basic",
+                    variant="primary" if self._ui_mode != "expert" else "default",
+                )
+                yield Button(
+                    i18n.t("settings.mode_expert"), id="btn-mode-expert",
+                    variant="primary" if self._ui_mode == "expert" else "default",
+                )
+                yield Label(i18n.t("settings.mode_hint"), id="mode-hint")
             with TabbedContent(initial="tab-display"):
                 with TabPane(i18n.t("settings.tab_display"), id="tab-display"):
                     yield OptionList(
@@ -264,14 +290,14 @@ class SettingsScreen(ModalScreen[bool]):
                         yield Button(i18n.t("settings.open_terminal_login"), id="btn-open-terminal-login")
                         yield Button(i18n.t("settings.logout"), variant="error", id="btn-logout")
                 with TabPane(i18n.t("settings.tab_analysis"), id="tab-analysis"):
-                    with Static(classes="setting-row setting-row-tall"):
+                    with Static(classes="setting-row setting-row-tall expert-only"):
                         yield Label(i18n.t("settings.seg_mode"))
                         yield OptionList(
                             Option(i18n.t("settings.dynamic"), id="dynamic"),
                             Option(i18n.t("settings.fixed"), id="fixed"),
                             id="seg-mode-options",
                         )
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.min_samples"))
                         yield Input(str(settings.MIN_SEGMENT_SAMPLES), type="integer", id="inp-min-samples")
                     with Static(classes="setting-row"):
@@ -280,44 +306,44 @@ class SettingsScreen(ModalScreen[bool]):
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.top_n"))
                         yield Input(str(settings.TOP_N), type="integer", id="inp-top-n")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.moe"))
                         yield Input(str(settings.MOE), type="number", id="inp-moe")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.batch_analysis"))
                         yield Switch(settings.ENABLE_BATCH_SEGMENT_ANALYSIS, id="sw-batch-analysis")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.confidence_level"))
                         yield Input(str(settings.CONFIDENCE_LEVEL), type="number", id="inp-confidence-level")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.llm_report"))
                         yield Switch(settings.ENABLE_LLM_ANALYSIS_REPORT, id="sw-llm-report")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.llm_concurrency"))
                         yield Input(str(settings.LLM_CONCURRENCY), type="integer", id="inp-concurrency")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.llm_tokenizer"))
                         yield Switch(settings.ENABLE_LLM_TOKENIZER, id="sw-llm-tokenizer")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.tokenizer_min_len"))
                         yield Input(str(settings.LLM_TOKENIZER_MIN_LENGTH), type="integer", id="inp-tokenizer-min-len")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.context_window"))
                         yield Input(str(settings.CONTEXT_TIME_WINDOW), type="number", id="inp-context-window")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.max_context_tokens"))
                         yield Input(str(settings.MAX_CONTEXT_TOKENS), type="integer", id="inp-max-context-tokens")
-                    yield Label(i18n.t("settings.section_corpus"), classes="section-label")
+                    yield Label(i18n.t("settings.section_corpus"), classes="section-label expert-only")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("compare.reuse"))
                         yield Switch(load_prefs().get("compare_reuse", True), id="sw-compare-reuse")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.corpus_statistics"))
                         yield Switch(settings.ENABLE_CORPUS_STATISTICS, id="sw-corpus-statistics")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.corpus_min_videos"))
                         yield Input(str(settings.CORPUS_MIN_VIDEOS_PER_PARTITION), type="integer", id="inp-corpus-min-videos")
-                    with Static(classes="setting-row setting-row-tall"):
+                    with Static(classes="setting-row setting-row-tall expert-only"):
                         yield Label(i18n.t("settings.corpus_zone_policy"))
                         yield OptionList(
                             Option(i18n.t("settings.zone_hot_only"), id="hot_only"),
@@ -325,10 +351,10 @@ class SettingsScreen(ModalScreen[bool]):
                             Option(i18n.t("settings.zone_weighted"), id="weighted"),
                             id="zone-policy-options",
                         )
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.corpus_temporal"))
                         yield Switch(settings.ENABLE_TEMPORAL_GROUPING, id="sw-temporal-grouping")
-                    with Static(classes="setting-row setting-row-tall"):
+                    with Static(classes="setting-row setting-row-tall expert-only"):
                         yield Label(i18n.t("settings.corpus_granularity"))
                         yield OptionList(
                             Option(i18n.t("settings.gran_year"), id="year"),
@@ -336,10 +362,10 @@ class SettingsScreen(ModalScreen[bool]):
                             Option(i18n.t("settings.gran_month"), id="month"),
                             id="granularity-options",
                         )
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.scheduler_workers"))
                         yield Input(str(settings.SCHEDULER_WORKERS), type="integer", id="inp-scheduler-workers")
-                    with Static(classes="setting-row setting-row-tall"):
+                    with Static(classes="setting-row setting-row-tall expert-only"):
                         yield Label(i18n.t("settings.viz_backend"))
                         yield OptionList(
                             Option(i18n.t("settings.viz_python"), id="python"),
@@ -347,13 +373,13 @@ class SettingsScreen(ModalScreen[bool]):
                             id="viz-backend-options",
                         )
                 with TabPane(i18n.t("settings.tab_llm"), id="tab-llm"):
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.dual_path"))
                         yield Switch(llm_cfg.ENABLE_DUAL_PATH, id="sw-dual-path")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.jsd_low"))
                         yield Input(str(llm_cfg.JSD_THRESHOLD_LOW), type="number", id="inp-jsd-low")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.jsd_medium"))
                         yield Input(str(llm_cfg.JSD_THRESHOLD_MEDIUM), type="number", id="inp-jsd-medium")
                     yield Label(i18n.t("settings.simple_section"), classes="section-label")
@@ -361,14 +387,10 @@ class SettingsScreen(ModalScreen[bool]):
                         yield Label(i18n.t("settings.base_url"))
                         yield Input(llm_cfg.SIMPLE_LLM_BASE_URL, id="inp-simple-url")
                         yield Button(i18n.t("settings.key_test"), id="btn-test-simple-url", classes="key-btn")
-                        yield Button(i18n.t("settings.key_copy"), id="btn-copy-simple-url", classes="key-btn")
-                        yield Button(i18n.t("settings.key_paste"), id="btn-paste-simple-url", classes="key-btn")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.api_key"))
                         yield Input(llm_cfg.SIMPLE_LLM_API_KEY, password=True, id="inp-simple-key")
                         yield Button(i18n.t("settings.key_show"), id="btn-show-simple-key", classes="key-btn")
-                        yield Button(i18n.t("settings.key_copy"), id="btn-copy-simple-key", classes="key-btn")
-                        yield Button(i18n.t("settings.key_paste"), id="btn-paste-simple-key", classes="key-btn")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.model_name"))
                         yield Input(llm_cfg.SIMPLE_LLM_MODEL, id="inp-simple-model")
@@ -376,9 +398,7 @@ class SettingsScreen(ModalScreen[bool]):
                             self._thinking_label("simple"), id="btn-thinking-simple", classes="key-btn",
                             variant="primary" if self._thinking["simple"] else "default",
                         )
-                        yield Button(i18n.t("settings.key_copy"), id="btn-copy-simple-model", classes="key-btn")
-                        yield Button(i18n.t("settings.key_paste"), id="btn-paste-simple-model", classes="key-btn")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.timeout"))
                         yield Input(str(llm_cfg.SIMPLE_LLM_TIMEOUT), type="number", id="inp-simple-timeout")
                     yield Label(i18n.t("settings.complex_section"), classes="section-label")
@@ -386,14 +406,10 @@ class SettingsScreen(ModalScreen[bool]):
                         yield Label(i18n.t("settings.base_url"))
                         yield Input(llm_cfg.COMPLEX_LLM_BASE_URL, id="inp-complex-url")
                         yield Button(i18n.t("settings.key_test"), id="btn-test-complex-url", classes="key-btn")
-                        yield Button(i18n.t("settings.key_copy"), id="btn-copy-complex-url", classes="key-btn")
-                        yield Button(i18n.t("settings.key_paste"), id="btn-paste-complex-url", classes="key-btn")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.api_key"))
                         yield Input(llm_cfg.COMPLEX_LLM_API_KEY, password=True, id="inp-complex-key")
                         yield Button(i18n.t("settings.key_show"), id="btn-show-complex-key", classes="key-btn")
-                        yield Button(i18n.t("settings.key_copy"), id="btn-copy-complex-key", classes="key-btn")
-                        yield Button(i18n.t("settings.key_paste"), id="btn-paste-complex-key", classes="key-btn")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.model_name"))
                         yield Input(llm_cfg.COMPLEX_LLM_MODEL, id="inp-complex-model")
@@ -401,9 +417,7 @@ class SettingsScreen(ModalScreen[bool]):
                             self._thinking_label("complex"), id="btn-thinking-complex", classes="key-btn",
                             variant="primary" if self._thinking["complex"] else "default",
                         )
-                        yield Button(i18n.t("settings.key_copy"), id="btn-copy-complex-model", classes="key-btn")
-                        yield Button(i18n.t("settings.key_paste"), id="btn-paste-complex-model", classes="key-btn")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.timeout"))
                         yield Input(str(llm_cfg.COMPLEX_LLM_TIMEOUT), type="number", id="inp-complex-timeout")
                     yield Label(i18n.t("settings.report_section"), classes="section-label")
@@ -411,14 +425,10 @@ class SettingsScreen(ModalScreen[bool]):
                         yield Label(i18n.t("settings.base_url"))
                         yield Input(llm_cfg.ANALYSIS_REPORT_LLM_BASE_URL, id="inp-report-url")
                         yield Button(i18n.t("settings.key_test"), id="btn-test-report-url", classes="key-btn")
-                        yield Button(i18n.t("settings.key_copy"), id="btn-copy-report-url", classes="key-btn")
-                        yield Button(i18n.t("settings.key_paste"), id="btn-paste-report-url", classes="key-btn")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.api_key"))
                         yield Input(llm_cfg.ANALYSIS_REPORT_LLM_API_KEY, password=True, id="inp-report-key")
                         yield Button(i18n.t("settings.key_show"), id="btn-show-report-key", classes="key-btn")
-                        yield Button(i18n.t("settings.key_copy"), id="btn-copy-report-key", classes="key-btn")
-                        yield Button(i18n.t("settings.key_paste"), id="btn-paste-report-key", classes="key-btn")
                     with Static(classes="setting-row"):
                         yield Label(i18n.t("settings.model_name"))
                         yield Input(llm_cfg.ANALYSIS_REPORT_LLM_MODEL, id="inp-report-model")
@@ -426,12 +436,10 @@ class SettingsScreen(ModalScreen[bool]):
                             self._thinking_label("report"), id="btn-thinking-report", classes="key-btn",
                             variant="primary" if self._thinking["report"] else "default",
                         )
-                        yield Button(i18n.t("settings.key_copy"), id="btn-copy-report-model", classes="key-btn")
-                        yield Button(i18n.t("settings.key_paste"), id="btn-paste-report-model", classes="key-btn")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.report_temp"))
                         yield Input(str(llm_cfg.ANALYSIS_REPORT_LLM_TEMPERATURE), type="number", id="inp-report-temp")
-                    with Static(classes="setting-row"):
+                    with Static(classes="setting-row expert-only"):
                         yield Label(i18n.t("settings.timeout"))
                         yield Input(str(llm_cfg.ANALYSIS_REPORT_LLM_TIMEOUT), type="number", id="inp-report-timeout")
                 with TabPane(i18n.t("settings.tab_about"), id="tab-about"):
@@ -455,6 +463,7 @@ class SettingsScreen(ModalScreen[bool]):
                 yield Button(i18n.t("settings.cancel"), id="btn-cancel")
 
     def on_mount(self) -> None:
+        self._apply_ui_mode()
         self._constrain_tab_panes()
         self._disable_decorative_focus()
         settings = get_settings()
@@ -512,16 +521,20 @@ class SettingsScreen(ModalScreen[bool]):
         )
 
     def _fill_help_tables(self) -> None:
-        """填充关于页参数说明表（无表头，两列：参数名/说明）"""
+        """填充关于页参数说明表（无表头，两列：参数名/说明）；基础模式过滤专家级条目与控件显隐分级一致"""
+        show_expert = self._ui_mode == "expert"
         for table_id, help_key in (
             ("#help-analysis-table", "settings.help_analysis"),
             ("#help-llm-table", "settings.help_llm"),
             ("#help-general-table", "settings.help_general"),
         ):
             table = self.query_one(table_id, DataTable)
+            table.clear(columns=True)
             table.show_header = False
             table.add_columns("参数", "说明")
             for name, desc in i18n.raw(help_key).items():
+                if not show_expert and name in _EXPERT_HELP_KEYS:
+                    continue
                 table.add_row(name, desc)
 
     async def _load_credential_fields(self) -> None:
@@ -613,6 +626,10 @@ class SettingsScreen(ModalScreen[bool]):
             self._toggle_thinking(button_id)
         elif button_id.startswith("btn-test-"):
             self._test_connection(button_id)
+        elif button_id == "btn-mode-basic":
+            self._switch_ui_mode("basic")
+        elif button_id == "btn-mode-expert":
+            self._switch_ui_mode("expert")
         elif button_id == "btn-open-project":
             self._open_url("https://github.com/SanKaGenKeShi/DanmakuScope")
         elif button_id == "btn-open-author":
@@ -621,6 +638,21 @@ class SettingsScreen(ModalScreen[bool]):
             self.app._open_system_terminal()
         elif button_id == "btn-logout":
             self.app.push_screen(_LogoutConfirmScreen(), self._on_logout_confirmed)
+
+    def _apply_ui_mode(self) -> None:
+        """基础模式隐藏 expert-only 控件降低认知负担，专家模式全量展示；两档共用同一批控件，保存/恢复默认逻辑不分档"""
+        show_expert = self._ui_mode == "expert"
+        for widget in self.query(".expert-only"):
+            widget.display = show_expert
+        self.query_one("#btn-mode-basic", Button).variant = "default" if show_expert else "primary"
+        self.query_one("#btn-mode-expert", Button).variant = "primary" if show_expert else "default"
+
+    def _switch_ui_mode(self, mode: str) -> None:
+        """模式切换会话内即时生效并落盘（界面偏好，与主题/动画同性质，不受保存/取消约束）；参数说明表同步重填"""
+        self._ui_mode = mode
+        self._apply_ui_mode()
+        self._fill_help_tables()
+        save_prefs({"ui_mode": mode})
 
     def _reset_current_tab(self) -> None:
         """根据当前激活标签页执行对应的恢复默认逻辑（仅可设置页）"""
@@ -850,6 +882,7 @@ class SettingsScreen(ModalScreen[bool]):
         prefs["compare_reuse"] = self.query_one("#sw-compare-reuse", Switch).value
         prefs["theme"] = self.app.theme
         prefs["animations"] = animations
+        prefs["ui_mode"] = self._ui_mode
         save_prefs(prefs)
         # LLM 配置写回 .env（.env 为 LLM 配置唯一数据源，CLI/TUI 启动时直接加载）
         write_llm_env({key: getattr(llm_cfg, key) for key in ENV_LLM_KEYS})

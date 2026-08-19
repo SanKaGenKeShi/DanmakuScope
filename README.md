@@ -2,7 +2,7 @@
 
 B 站弹幕社会语言学分析工具（命令行 + 终端图形界面）。采集弹幕及视频元数据，经硬统计与 LLM 软标签双通道分析后，按官方分区（tname）聚合输出交叉统计表，为社会语言学/语料库语言学实证研究提供可溯源、可复核的语料数据。
 
-当前版本：**v0.3.6-beta**
+当前版本：**v0.3.7-beta**
 
 ---
 
@@ -17,10 +17,10 @@ B 站弹幕社会语言学分析工具（命令行 + 终端图形界面）。采
 | 统计推断 | Wilson 置信区间 + 样本量校验，可选单视频段间 Mann-Whitney U（默认关闭）                   |
 | 分析报告 | 可选调用 LLM 生成社会语言学语料分析报告                                                           |
 | 产出打包 | 全部产出自动打包为 `[BV号]视频标题.zip`                                                           |
-| 语料库比较 | 跨视频语料库级聚合 + KW/Mann-Whitney U/Cliff's delta 推断统计 + 分区缺口补足建议 + R/Python 双后端可视化 |
+| 语料库比较 | 跨视频复数分析：同分区自动合并分析（冷热区配对/跨时段历时检验），跨分区比对（KW/Mann-Whitney U/Cliff's delta）+ 分区缺口补足建议 + R/Python 双后端可视化 |
 | 学术产出 | 方法论描述自动生成（methodology.md）+ LaTeX 表格片段 / APA 统计文本导出 |
 | 规模化与可复现 | 任务队列调度（中断无损恢复）+ 语料库快照 diff + YAML 批量脚本 + 可复现 manifest |
-| TUI 界面 | Textual 终端图形界面：个体分析/比对分析双模式、设置中心（含参数说明与 LLM 连接检测）、设置持久化 |
+| TUI 界面 | Textual 终端图形界面：个体分析/复数分析双模式、首启向导、设置中心（基础/专家分档，含参数说明与 LLM 连接检测）、设置持久化 |
 
 ---
 
@@ -118,14 +118,14 @@ danmaku-analyzer config
 danmaku-analyzer login
 danmaku-analyzer account
 
-# 跨视频比对分析（逐个分析 + 语料库聚合 + 推断统计，复用已有报告）
-danmaku-analyzer compare BV1xx411c7mD BV1yy411c7mE
+# 跨视频复数分析（同分区自动合并分析，跨分区比对；逐个分析 + 语料库聚合 + 推断统计，复用已有报告）
+danmaku-analyzer plural BV1xx411c7mD BV1yy411c7mE
 
 # 全部重新分析，不复用过往数据
-danmaku-analyzer compare BV1xx411c7mD --no-reuse
+danmaku-analyzer plural BV1xx411c7mD --no-reuse
 
 # 断点续传：从进度文件跳过已完成视频
-danmaku-analyzer compare BV1xx411c7mD BV1yy411c7mE --resume
+danmaku-analyzer plural BV1xx411c7mD BV1yy411c7mE --resume
 
 # 语料库级聚合（回读单视频 ZIP，可选 --from-index 从索引聚合 / --with-plots 生成可视化脚本）
 danmaku-analyzer corpus "[BV1xx]标题.zip" "[BV1yy]标题.zip" --with-plots
@@ -137,7 +137,7 @@ danmaku-analyzer export "[corpus]_3videos_xxx.zip" --format apa
 # 语料库快照对比（视频级新增/移除/变更，支撑历时研究）
 danmaku-analyzer diff "[corpus]_3videos_旧.zip" "[corpus]_5videos_新.zip"
 
-# 批量脚本模式（YAML 任务文件定义 analyze/batch/compare 任务集）
+# 批量脚本模式（YAML 任务文件定义 analyze/batch/plural 任务集）
 danmaku-analyzer script tasks.yaml
 
 # 语料库补足建议（分区缺口 + 在线候选视频；--gaps-only 仅离线缺口）
@@ -145,7 +145,7 @@ danmaku-analyzer suggest 游戏 音乐 --per-partition 5
 danmaku-analyzer suggest --gaps-only
 ```
 
-**TUI 界面**（个体分析 / 比对分析双模式，设置中心支持参数编辑与持久化）：
+**TUI 界面**（个体分析 / 复数分析双模式，首次启动弹出配置向导，设置中心基础/专家分档并支持参数编辑与持久化）：
 
 ```bash
 danmaku-tui
@@ -165,13 +165,18 @@ danmaku-tui
 ├── table_emotion.csv                   # 情感分布
 ├── table_interaction_type.csv          # 互动类型分布
 ├── table_consensus_stats.csv           # 共识水平统计
+├── danmaku_raw.csv                     # 全量原始弹幕（未清洗，供语料附录与复核）
+├── report.html                         # HTML 可视化报告（离线单文件，双击直读）
 ├── heatmap_data.json                   # 热力图数据
 ├── kappa_ready.csv                     # 编码员间一致性复核用
 ├── metadata.json                       # 元数据（含双路 Kappa 质控指标）
 ├── methodology.md                      # 方法论描述（可直接引用）
 ├── repro_manifest.json                 # 可复现环境快照（依赖版本/白名单配置，无敏感字段）
-└── sociolinguistic_analysis_report.md  # LLM 分析报告（可选）
+├── sociolinguistic_analysis_report.md  # LLM 分析报告（可选）
+└── 词类统计表.csv 等 8 份中文版          # 与上述聚合表/原始弹幕/HTML 报告同名双版，列头中文化，仅供阅读
 ```
+
+英文版保持契约名供程序回读（语料库聚合/导出消费英文版）；中文版为同名双产出，解压工具对中文名支持异常时不影响英文版完整性。
 
 ---
 

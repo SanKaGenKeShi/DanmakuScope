@@ -14,9 +14,9 @@ import pytest
 from danmaku_analyzer.exporter import Exporter
 from danmaku_analyzer.methodology import METHODOLOGY_FILENAME, MethodologyGenerator
 from danmaku_analyzer.llm_models import DualPathResult, ConsensusLevel, LLMOutput
-from danmaku_analyzer.aggregator import DanmakuRecord
+from danmaku_analyzer.aggregator import AggregatedData, DanmakuRecord
 from danmaku_analyzer.pipeline import _build_quality_metrics
-from danmaku_analyzer.reporter import Reporter
+from danmaku_analyzer.reporter import Reporter, _translate_column
 
 
 @pytest.fixture
@@ -276,3 +276,93 @@ class TestQualityMetrics:
         records = [make_record([None, None]), make_record([raw_output(), raw_output()])]
         metrics = _build_quality_metrics(records)
         assert metrics["dual_path_samples"] == 1
+
+
+def make_aggregated():
+    return [AggregatedData(
+        tname="游戏", zone_type="hot_zone", danmaku_count=100,
+        pos_distribution={"n": 0.4, "ng": 0.1},
+        syllable_distribution={"单音节": 0.5},
+        orthography_hard_metrics={"uppercase_abbr_per_1000": 1.2,
+                                  "number_symbol_per_1000": 0.0, "emoticon_per_1000": 0.3},
+        emotion_distribution={"positive": 0.6},
+        sentence_function_distribution={"assertion": 0.7},
+        interaction_type_distribution={"check_in": 0.3},
+        orthography_status_distribution={"standard": 0.9},
+        high_consensus_rate=0.8,
+    )]
+
+
+class TestZhTwinReports:
+
+    def test_generate_reports_writes_zh_twins(self, tmp_path):
+        reporter = Reporter(output_dir=str(tmp_path))
+        reports = reporter.generate_reports(make_aggregated(), metadata={"bvid": "BV1x"})
+        assert os.path.exists(os.path.join(str(tmp_path), "table_emotion.csv"))
+        zh = pd.read_csv(os.path.join(str(tmp_path), "情感分布表.csv"), encoding='utf-8-sig')
+        assert list(zh.columns[:3]) == ["分区", "冷热区", "弹幕数"]
+        assert "正面" in zh.columns and "positive" not in zh.columns
+        zh_keys = [k for k in reports if k.endswith("_zh")]
+        assert len(zh_keys) == 6 and all(os.path.exists(reports[k]) for k in zh_keys)
+
+    def test_english_contract_names_unchanged(self, tmp_path):
+        reporter = Reporter(output_dir=str(tmp_path))
+        reporter.generate_reports(make_aggregated(), metadata={"bvid": "BV1x"})
+        for name in ("table_lexical_by_partition.csv", "table_orthography.csv",
+                     "table_sentence_function.csv", "table_emotion.csv",
+                     "table_interaction_type.csv", "table_consensus_stats.csv",
+                     "metadata.json", "heatmap_data.json"):
+            assert os.path.exists(os.path.join(str(tmp_path), name))
+        en = pd.read_csv(os.path.join(str(tmp_path), "table_emotion.csv"), encoding='utf-8-sig')
+        assert list(en.columns[:3]) == ["tname", "zone_type", "danmaku_count"]
+
+    def test_dynamic_column_translation(self, tmp_path):
+        reporter = Reporter(output_dir=str(tmp_path))
+        reporter.generate_reports(make_aggregated(), metadata={"bvid": "BV1x"})
+        lexical = pd.read_csv(os.path.join(str(tmp_path), "词类统计表.csv"), encoding='utf-8-sig')
+        assert "词性_名词" in lexical.columns
+        assert "词性_ng" in lexical.columns
+        assert "音节_单音节" in lexical.columns
+        ortho = pd.read_csv(os.path.join(str(tmp_path), "正字法统计表.csv"), encoding='utf-8-sig')
+        assert "每千字大写缩写数" in ortho.columns
+        assert "LLM判定_规范书写" in ortho.columns
+
+    def test_raw_danmaku_export_with_zh_twin(self, tmp_path):
+        from danmaku_analyzer.crawler import DanmakuItem
+        items = [DanmakuItem(uid_hash=f"u{i}", content=f"弹幕{i}", time_sec=float(i),
+                             identity_type="real_user") for i in range(3)]
+        reporter = Reporter(output_dir=str(tmp_path))
+        path = reporter.generate_raw_danmaku(items)
+        df = pd.read_csv(path, encoding='utf-8-sig')
+        assert list(df.columns) == ["uid_hash", "content", "time_sec", "identity_type"]
+        assert len(df) == 3
+        zh = pd.read_csv(os.path.join(str(tmp_path), "原始弹幕.csv"), encoding='utf-8-sig')
+        assert list(zh.columns) == ["用户哈希", "弹幕内容", "时间点(秒)", "身份类型"]
+        assert "danmaku_raw_zh" in reporter.zh_reports
+
+    def test_raw_danmaku_empty_list_keeps_header(self, tmp_path):
+        reporter = Reporter(output_dir=str(tmp_path))
+        path = reporter.generate_raw_danmaku([])
+        df = pd.read_csv(path, encoding='utf-8-sig')
+        assert list(df.columns) == ["uid_hash", "content", "time_sec", "identity_type"]
+        assert len(df) == 0
+
+
+class TestTranslateColumn:
+
+    def test_fixed_and_label_columns(self):
+        assert _translate_column("tname") == "分区"
+        assert _translate_column("avg_word_length") == "平均词长"
+        assert _translate_column("positive") == "正面"
+        assert _translate_column("community_variant") == "社区变体"
+
+    def test_prefix_columns(self):
+        assert _translate_column("pos_v") == "词性_动词"
+        assert _translate_column("pos_eng") == "词性_外语"
+        assert _translate_column("syllable_双音节") == "音节_双音节"
+        assert _translate_column("hard_emoticon_per_1000") == "每千字颜文字数"
+        assert _translate_column("soft_non_standard_typo") == "LLM判定_非规范错字"
+
+    def test_unknown_column_preserved(self):
+        assert _translate_column("mystery_column") == "mystery_column"
+        assert _translate_column("pos_zzz") == "词性_zzz"

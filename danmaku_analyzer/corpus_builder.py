@@ -24,6 +24,8 @@ logger = get_logger(__name__)
 
 METADATA_FILENAME = "metadata.json"
 VIDEOS_CSV_FILENAME = "corpus_videos.csv"
+RAW_DANMAKU_FILENAME = "danmaku_raw.csv"
+MERGED_RAW_FILENAME = "danmaku_corpus.csv"
 
 # ZIP 内需回读的表：文件名 → 除 danmaku_count 外的标量列（其余列视为分布占比）
 TABLE_SPECS = {
@@ -104,6 +106,8 @@ class CorpusBuildResult:
     source_zip_paths: List[str] = field(default_factory=list)
     output_dir: str = ""
     warnings: List[str] = field(default_factory=list)
+    tnames: List[str] = field(default_factory=list)  # 纳入视频的分区集合（单元素即合并分析模式）
+    merged_raw_csv_path: Optional[str] = None  # 合并弹幕总表（旧版 ZIP 无原始弹幕表时为 None）
     zip_path: Optional[str] = None
     zip_valid: bool = False
 
@@ -318,6 +322,8 @@ class CorpusBuilder:
             source_zip_paths=list(source_zip_paths or []),
             output_dir=out_dir,
             warnings=warnings,
+            tnames=sorted({s.tname for s in summaries if s.tname}),
+            merged_raw_csv_path=self._write_merged_raw_danmaku(source_zip_paths or [], out_dir),
         )
 
     def _aggregate_groups(self, summaries: List[VideoSummary]) -> Tuple[List[Dict], List[str]]:
@@ -371,7 +377,10 @@ class CorpusBuilder:
         zip_filename = f"[corpus]_{meta['video_count']}videos_{timestamp}.zip"
         zip_path = os.path.join(out_dir, zip_filename)
 
-        loose_files = [result.csv_path, result.videos_csv_path, meta_path] + list(extra_files or [])
+        loose_files = [result.csv_path, result.videos_csv_path, meta_path]
+        if result.merged_raw_csv_path:
+            loose_files.append(result.merged_raw_csv_path)
+        loose_files += list(extra_files or [])
         # 源 ZIP 按基名去重（同名冲突保留先出现的），全部置于 videos/ 前缀下
         source_entries: List[Tuple[str, str]] = []
         seen_names = set()
@@ -449,10 +458,13 @@ class CorpusBuilder:
             return []
 
     def _write_video_observations(self, summaries: List[VideoSummary], filepath: str):
+        settings = get_settings()
+        temporal = settings.ENABLE_TEMPORAL_GROUPING
         records = []
         for s in summaries:
             record = {
                 "bvid": s.bvid, "tname": s.tname, "pubdate": s.pubdate,
+                "time_period": self._bucket_pubdate(s.pubdate, settings.TEMPORAL_GRANULARITY) if temporal else "",
                 "prompt_version": s.prompt_version,
                 "zone_type": s.zone_type or "", "danmaku_count": s.danmaku_count,
             }
@@ -461,6 +473,36 @@ class CorpusBuilder:
             records.append(record)
         pd.DataFrame(records).to_csv(filepath, index=False, encoding='utf-8-sig')
         logger.info(f"视频级观测表已保存: {filepath}（{len(records)} 行）")
+
+    def _write_merged_raw_danmaku(self, zip_paths: List[str], out_dir: str) -> Optional[str]:
+        """合并各 ZIP 全量原始弹幕为语料库总表（首列 bvid）；无原始弹幕表的旧版 ZIP 跳过并告警"""
+        frames = []
+        missing = 0
+        for path in zip_paths:
+            try:
+                with zipfile.ZipFile(path, 'r') as zipf:
+                    names = set(zipf.namelist())
+                    if RAW_DANMAKU_FILENAME not in names:
+                        missing += 1
+                        continue
+                    bvid = ""
+                    if METADATA_FILENAME in names:
+                        bvid = json.loads(zipf.read(METADATA_FILENAME).decode('utf-8')).get("bvid", "")
+                    df = pd.read_csv(io.BytesIO(zipf.read(RAW_DANMAKU_FILENAME)), encoding='utf-8-sig')
+            except (OSError, zipfile.BadZipFile, json.JSONDecodeError) as e:
+                logger.warning(f"原始弹幕表回读失败，跳过: {path} - {e}")
+                missing += 1
+                continue
+            df.insert(0, "bvid", bvid)
+            frames.append(df)
+        if missing:
+            logger.warning(f"{missing} 个 ZIP 缺少 danmaku_raw.csv（v0.3.7 前产出），未纳入合并弹幕总表")
+        if not frames:
+            return None
+        filepath = os.path.join(out_dir, MERGED_RAW_FILENAME)
+        pd.concat(frames, ignore_index=True).to_csv(filepath, index=False, encoding='utf-8-sig')
+        logger.info(f"合并弹幕总表已保存: {filepath}（{sum(len(f) for f in frames)} 条）")
+        return filepath
 
     def _aggregate_group(self, tname: str, time_period: str, zone_type: str, items: List[VideoSummary]) -> Dict:
         """组级聚合：标量取视频级均值/标准差，分布按弹幕数加权均值"""

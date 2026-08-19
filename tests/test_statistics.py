@@ -154,14 +154,18 @@ class TestCorpusCompare:
         assert kw["statistic"] == pytest.approx(expected_h, abs=1e-4)
         assert kw["p_value"] == pytest.approx(expected_p, abs=1e-6)
 
-    def test_single_valid_group_empty_result(self, validator, tmp_path):
+    def test_single_valid_group_no_between_test_but_status_rows(self, validator, tmp_path):
         rows = [make_video(f"BV1g{i}", "游戏", 0.3 + i * 0.05) for i in range(3)]
         rows += [make_video("BV1m0", "音乐", 0.6)]
         csv_path = write_videos_csv(tmp_path, rows)
         result = validator.corpus_compare(csv_path)
-        assert result.rows == []
-        assert result.to_dataframe().empty
-        assert len(result.to_dataframe().columns) == len(STATISTICAL_TESTS_COLUMNS)
+        df = result.to_dataframe()
+        # 有效组仅 1 个不执行组间检验，但样本状态行照常输出；多分区场景不补配对/注记行
+        assert (df["test_type"] == "sample_status").all()
+        status = df.set_index("group1")["note"]
+        assert status["游戏"] == "sample_sufficient"
+        assert "insufficient_sample" in status["音乐"]
+        assert list(df.columns) == list(STATISTICAL_TESTS_COLUMNS)
 
     def test_disabled_switch_returns_disabled_empty(self, validator, tmp_path, monkeypatch):
         monkeypatch.setattr(get_settings(), "ENABLE_CORPUS_STATISTICS", False)
@@ -183,6 +187,85 @@ class TestCorpusCompare:
         df = pd.read_csv(out, encoding='utf-8-sig')
         assert list(df.columns) == STATISTICAL_TESTS_COLUMNS
         assert len(df) == 0
+
+
+class TestPluralModes:
+    """复数分析：单分区历时比较 / 冷热区视频内配对 / 无比较轴注记"""
+
+    def _make_row(self, bvid, tname, density, time_period="", zone_type=""):
+        row = make_video(bvid, tname, density)
+        row["time_period"] = time_period
+        row["zone_type"] = zone_type
+        return row
+
+    def test_single_partition_temporal_groups_by_period(self, validator, tmp_path):
+        rows = [self._make_row(f"BV1a{i}", "游戏", 0.3 + i * 0.05, time_period="2023") for i in range(3)]
+        rows += [self._make_row(f"BV1b{i}", "游戏", 0.6 + i * 0.05, time_period="2024") for i in range(3)]
+        csv_path = write_videos_csv(tmp_path, rows)
+        df = validator.corpus_compare(csv_path).to_dataframe()
+        # 单分区×多时段 → 自动按时段分组执行组间检验
+        assert set(df[df["test_type"] == "sample_status"]["group1"]) == {"2023", "2024"}
+        assert len(df[df["test_type"] == "Kruskal-Wallis"]) == len(SCALAR_FIELDS)
+        mwu = df[df["test_type"] == "Mann-Whitney U"]
+        assert {(r["group1"], r["group2"]) for r in mwu.to_dict("records")} == {("2023", "2024")}
+
+    def test_single_partition_no_axis_emits_note(self, validator, tmp_path):
+        rows = [self._make_row(f"BV1a{i}", "游戏", 0.3 + i * 0.05) for i in range(3)]
+        csv_path = write_videos_csv(tmp_path, rows)
+        df = validator.corpus_compare(csv_path).to_dataframe()
+        note_rows = df[df["test_type"] == "note"]
+        assert len(note_rows) == 1
+        assert "无可用比较轴" in note_rows.iloc[0]["note"]
+
+    def test_zone_paired_wilcoxon_matches_scipy(self, validator, tmp_path):
+        rows = []
+        for i in range(4):
+            rows.append(self._make_row(f"BV1z{i}", "游戏", 0.3 + i * 0.02, zone_type="hot_zone"))
+            rows.append(self._make_row(f"BV1z{i}", "游戏", 0.6 + i * 0.02, zone_type="cold_zone"))
+        csv_path = write_videos_csv(tmp_path, rows)
+        paired = validator.zone_paired_compare(csv_path)
+        assert len(paired) == len(SCALAR_FIELDS)
+        for row in paired:
+            assert row["test_type"] == "Wilcoxon 符号秩（配对）"
+            assert row["group1"] == "hot_zone" and row["group2"] == "cold_zone"
+            assert row["n1"] == 4
+        density_row = next(r for r in paired if r["metric"] == "content_word_density")
+        hot = [0.3 + i * 0.02 for i in range(4)]
+        cold = [0.6 + i * 0.02 for i in range(4)]
+        expected_w, expected_p = stats.wilcoxon(hot, cold)
+        assert density_row["statistic"] == pytest.approx(expected_w, abs=1e-4)
+        assert density_row["p_value"] == pytest.approx(expected_p, abs=1e-6)
+        assert density_row["effect_size"] == pytest.approx(-1.0, abs=1e-4)
+
+    def test_zone_paired_requires_min_pairs(self, validator, tmp_path):
+        rows = []
+        for i in range(2):
+            rows.append(self._make_row(f"BV1z{i}", "游戏", 0.3, zone_type="hot_zone"))
+            rows.append(self._make_row(f"BV1z{i}", "游戏", 0.6, zone_type="cold_zone"))
+        csv_path = write_videos_csv(tmp_path, rows)
+        assert validator.zone_paired_compare(csv_path) == []
+
+    def test_corpus_compare_includes_paired_for_single_partition(self, validator, tmp_path):
+        rows = []
+        for i in range(3):
+            rows.append(self._make_row(f"BV1z{i}", "游戏", 0.3 + i * 0.02, zone_type="hot_zone"))
+            rows.append(self._make_row(f"BV1z{i}", "游戏", 0.6 + i * 0.02, zone_type="cold_zone"))
+        csv_path = write_videos_csv(tmp_path, rows)
+        df = validator.corpus_compare(csv_path).to_dataframe()
+        assert (df["test_type"] == "Wilcoxon 符号秩（配对）").any()
+        assert not (df["test_type"] == "note").any()
+
+    def test_zone_paired_dedups_duplicate_bvid(self, validator, tmp_path):
+        # 同 bvid 同区重复观测（不同输入解析到同一视频的残留场景）不得抬升配对数或错位
+        rows = []
+        for i in range(3):
+            rows.append(self._make_row(f"BV1z{i}", "游戏", 0.3, zone_type="hot_zone"))
+            rows.append(self._make_row(f"BV1z{i}", "游戏", 0.6, zone_type="cold_zone"))
+        rows.append(self._make_row("BV1z0", "游戏", 0.9, zone_type="hot_zone"))
+        rows.append(self._make_row("BV1z0", "游戏", 0.1, zone_type="cold_zone"))
+        csv_path = write_videos_csv(tmp_path, rows)
+        paired = validator.zone_paired_compare(csv_path)
+        assert paired and all(r["n1"] == 3 for r in paired)
 
 
 class TestCohenKappa:

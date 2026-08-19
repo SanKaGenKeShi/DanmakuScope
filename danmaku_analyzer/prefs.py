@@ -70,6 +70,23 @@ def save_prefs(updates: dict) -> None:
         logger.warning(f"TUI 偏好保存失败（仅本次会话生效）: {e}")
 
 
+def delete_pref(key: str) -> bool:
+    """删除单个偏好键并整体重写落盘（save_prefs 为合并语义删不了键），返回是否确实删除"""
+    prefs = load_prefs()
+    if key not in prefs:
+        return False
+    del prefs[key]
+    try:
+        path = _prefs_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(prefs, f, ensure_ascii=False, indent=2)
+        return True
+    except OSError as e:
+        logger.warning(f"TUI 偏好键 {key} 删除失败: {e}")
+        return False
+
+
 def write_llm_env(updates: dict, path: Optional[str] = None) -> None:
     """LLM 配置写回 .env：原位替换对应 KEY=VALUE 行（保留注释与其余行），缺失键追加至末尾"""
     path = path or _env_path()
