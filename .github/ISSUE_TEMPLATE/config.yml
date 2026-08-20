@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用文档 / Documentation
+    url: https://github.com/SanKaGenKeShi/DanmakuScope/blob/main/README.md
+    about: 安装、命令与产出说明见 README / See README for installation, commands and outputs

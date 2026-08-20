@@ -102,6 +102,76 @@ class TestApaExport:
         assert "知识" in text
         assert "未纳入推断检验" in text
 
+    def test_stats_to_apa_wilcoxon_paired_rows(self, exporter):
+        stats_df = pd.DataFrame([
+            {"metric": "content_word_density", "test_type": "Wilcoxon 符号秩（配对）",
+             "group1": "hot_zone", "group2": "cold_zone", "n1": 4, "n2": 4,
+             "statistic": 0.0, "p_value": 0.0433, "effect_size": -1.0,
+             "effect_magnitude": "large", "note": "未校正"},
+        ])
+        text = exporter.stats_to_apa(stats_df)
+        assert "冷热区配对比较" in text
+        assert "hot_zone vs cold_zone" in text
+        assert "n = 4 对" in text
+        assert "W = 0.000" in text
+        assert "p = .043" in text
+        assert "Cliff's δ = -1.000（large）" in text
+
+    def test_stats_to_apa_note_row(self, exporter):
+        stats_df = pd.DataFrame([
+            {"metric": "", "test_type": "note", "group1": "", "group2": "",
+             "n1": "", "n2": "", "statistic": "", "p_value": "",
+             "effect_size": "", "effect_magnitude": "",
+             "note": "单一分区且未启用时间分桶/冷热区双区保留，无可用比较轴，未执行推断检验"},
+        ])
+        text = exporter.stats_to_apa(stats_df)
+        assert "无可用比较轴" in text
+
+    def test_stats_to_apa_axis_wording(self, exporter):
+        rows = [{"metric": "content_word_density", "test_type": "Kruskal-Wallis",
+                 "group1": "", "group2": "", "n1": 6, "n2": "", "statistic": 6.25,
+                 "p_value": 0.012, "effect_size": "", "effect_magnitude": "",
+                 "note": "未校正 p 值（未实施多重比较校正）；检验轴：时段"}]
+        text = exporter.stats_to_apa(pd.DataFrame(rows))
+        assert "的时段间差异检验" in text
+        rows[0]["note"] = "未校正 p 值（未实施多重比较校正）"
+        text = exporter.stats_to_apa(pd.DataFrame(rows))
+        assert "的分区间差异检验" in text
+
+    def test_stats_to_apa_kw_effect_size(self, exporter):
+        stats_df = pd.DataFrame([
+            {"metric": "content_word_density", "test_type": "Kruskal-Wallis",
+             "group1": "", "group2": "", "n1": 6, "n2": "", "statistic": 6.25,
+             "p_value": 0.012, "effect_size": 0.35, "effect_magnitude": "",
+             "note": "未校正 p 值（未实施多重比较校正）"},
+        ])
+        text = exporter.stats_to_apa(stats_df)
+        assert "ε² = 0.350" in text
+
+
+class TestStatsLatexExport:
+
+    def test_stats_to_latex_table(self, exporter):
+        stats_df = pd.DataFrame([
+            {"metric": "content_word_density", "test_type": "Kruskal-Wallis",
+             "group1": "", "group2": "", "n1": 6, "n2": "", "statistic": 6.25,
+             "p_value": 0.012, "effect_size": 0.35, "effect_magnitude": "", "note": "未校正"},
+            {"metric": "", "test_type": "sample_status", "group1": "游戏", "group2": "",
+             "n1": 3, "n2": "", "statistic": "", "p_value": "",
+             "effect_size": "", "effect_magnitude": "", "note": "sample_sufficient"},
+        ])
+        text = exporter.stats_to_latex(stats_df)
+        assert "\\begin{tabular}" in text
+        assert "tab:statistical_tests" in text
+        assert "Kruskal-Wallis" in text
+        assert "nan" not in text.lower()
+
+    def test_corpus_zip_latex_contains_stats_table(self, exporter, tmp_path):
+        zip_path = TestZipExport()._make_corpus_zip(tmp_path)
+        content = exporter.from_zip(zip_path, "latex")
+        assert "tab:statistical_tests" in content
+        assert "差异检验" not in content
+
     def test_p_below_threshold_reported_as_lt(self, exporter):
         assert exporter._apa_p(0.0001) == "< .001"
 

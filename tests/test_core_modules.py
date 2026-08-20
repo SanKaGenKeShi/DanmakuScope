@@ -8,7 +8,7 @@ import json
 import numpy as np
 
 from danmaku_analyzer.hard_metrics import HardMetricsAnalyzer, HardMetricsResult
-from danmaku_analyzer.aggregator import Aggregator, AggregatedData, DanmakuRecord
+from danmaku_analyzer.aggregator import Aggregator, DanmakuRecord
 from danmaku_analyzer.reporter import Reporter
 from danmaku_analyzer.timeline_segmenter import TimelineSegmenter, TimeSegment
 from danmaku_analyzer.crawler import DanmakuItem

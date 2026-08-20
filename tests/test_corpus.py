@@ -14,9 +14,11 @@ from unittest.mock import patch
 
 import danmaku_analyzer.corpus_builder as corpus_builder_module
 import danmaku_analyzer.corpus_store as corpus_store_module
+from danmaku_analyzer.corpus_methodology import CORPUS_METHODOLOGY_FILENAME, CorpusMethodologyGenerator
 from danmaku_analyzer.corpus_store import CorpusStore
 from danmaku_analyzer.corpus_builder import SCALAR_FIELDS, CorpusBuilder, CorpusManifest
 from danmaku_analyzer.config import get_settings
+from danmaku_analyzer.statistical_validator import StatisticalValidator
 
 
 # ========== 辅助工厂函数 ==========
@@ -518,6 +520,85 @@ class TestCorpusReportPrompt:
         assert "组级聚合数据" in prompt
         assert "BV1r1" in prompt and "BV1r2" in prompt
 
+    def test_corpus_user_prompt_injects_test_rows(self, tmp_path, tmp_store):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        make_fake_zip(src_dir, "BV1s1", "游戏", density=0.4)
+
+        builder = CorpusBuilder()
+        result = builder.build_from_zips([str(p) for p in src_dir.glob("*.zip")],
+                                          output_dir=str(tmp_path / "out"))
+        meta = builder.build_snapshot_metadata(result)
+        stats_path = os.path.join(result.output_dir, "statistical_tests.csv")
+        pd.DataFrame([{
+            "metric": "content_word_density", "test_type": "Wilcoxon 符号秩（配对）",
+            "group1": "hot_zone", "group2": "cold_zone", "n1": 3, "n2": 3,
+            "statistic": 0.0, "p_value": 0.05, "effect_size": -1.0,
+            "effect_magnitude": "large", "note": "未校正",
+        }]).to_csv(stats_path, index=False, encoding='utf-8-sig')
+
+        with patch("danmaku_analyzer.llm_factory.AsyncOpenAI"):
+            from danmaku_analyzer.report_generator import AnalysisReportGenerator
+            gen = AnalysisReportGenerator()
+        prompt = gen._build_corpus_user_prompt(result.csv_path, result.videos_csv_path, meta, stats_path)
+        assert "推断检验结果" in prompt
+        assert "Wilcoxon 符号秩（配对）" in prompt
+
+    def test_corpus_user_prompt_omits_test_section_without_stats(self, tmp_path, tmp_store):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        make_fake_zip(src_dir, "BV1s2", "游戏", density=0.4)
+
+        builder = CorpusBuilder()
+        result = builder.build_from_zips([str(p) for p in src_dir.glob("*.zip")],
+                                          output_dir=str(tmp_path / "out"))
+        meta = builder.build_snapshot_metadata(result)
+
+        with patch("danmaku_analyzer.llm_factory.AsyncOpenAI"):
+            from danmaku_analyzer.report_generator import AnalysisReportGenerator
+            gen = AnalysisReportGenerator()
+        prompt = gen._build_corpus_user_prompt(result.csv_path, result.videos_csv_path, meta, None)
+        assert "推断检验结果" not in prompt
+
+
+class TestCorpusMethodology:
+
+    def test_render_single_partition_no_tests(self, tmp_path, tmp_store):
+        make_fake_zip(tmp_path, "BV1ma", "游戏")
+        make_fake_zip(tmp_path, "BV1mb", "游戏")
+        builder = CorpusBuilder()
+        result = builder.build_from_zips([str(p) for p in tmp_path.glob("*.zip")],
+                                          output_dir=str(tmp_path / "out"))
+        comparison = StatisticalValidator().corpus_compare(result.videos_csv_path)
+        text = CorpusMethodologyGenerator(str(tmp_path / "out")).render(result, comparison)
+        assert "合并分析" in text
+        assert "未执行推断检验" in text
+        assert "视频级观测" in text
+        assert "未校正" not in text
+
+    def test_render_multi_partition_with_tests(self, tmp_path, tmp_store):
+        for i in range(3):
+            make_fake_zip(tmp_path, f"BV1g{i}", "游戏", density=0.3 + i * 0.05)
+            make_fake_zip(tmp_path, f"BV1m{i}", "音乐", density=0.6 + i * 0.05)
+        builder = CorpusBuilder()
+        result = builder.build_from_zips([str(p) for p in tmp_path.glob("*.zip")],
+                                          output_dir=str(tmp_path / "out"))
+        comparison = StatisticalValidator().corpus_compare(result.videos_csv_path)
+        text = CorpusMethodologyGenerator(str(tmp_path / "out")).render(result, comparison)
+        assert "比对分析" in text
+        assert "Kruskal-Wallis" in text
+        assert "Mann-Whitney U" in text
+        assert "未校正" in text
+
+    def test_write_creates_file(self, tmp_path, tmp_store):
+        make_fake_zip(tmp_path, "BV1mw", "游戏")
+        builder = CorpusBuilder()
+        result = builder.build_from_zips([str(p) for p in tmp_path.glob("*.zip")],
+                                          output_dir=str(tmp_path / "out"))
+        path = CorpusMethodologyGenerator(str(tmp_path / "out")).write(result)
+        assert os.path.basename(path) == CORPUS_METHODOLOGY_FILENAME
+        assert os.path.exists(path)
+
 
 class TestMergedRawDanmaku:
 
@@ -560,7 +641,7 @@ class TestCorpusCliOutputs:
             "total_videos": 1, "total_danmaku": 100, "total_segments": 1,
             "partitions": [tname], "bvid": bvid, "title": f"测试-{bvid}",
             "tname": tname, "tags": [], "pubdate": "2025-03-15T10:00:00",
-            "view_count": 1000, "danmaku_count": 100, "pipeline_version": "0.3.7-beta",
+            "view_count": 1000, "danmaku_count": 100, "pipeline_version": "0.3.8-beta",
         }
 
         def table(rows):

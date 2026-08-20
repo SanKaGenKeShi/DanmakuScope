@@ -1,0 +1,377 @@
+name: Build / Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      build_target:
+        description: 'Build Target'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - 'windows'
+          - 'macos'
+          - 'linux'
+          - 'all'
+      create_release:
+        description: 'Create Release'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "${{ github.event_name }}" = "push" ] && [ "v$VERSION" != "${{ github.ref_name }}" ]; then
+            echo "tag ${{ github.ref_name }} 与 pyproject.toml 版本 $VERSION 不一致，请先同步版本号"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$VERSION"
+
+      - name: Create tag and release
+        if: ${{ github.event_name == 'push' || github.event.inputs.create_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v$VERSION"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            PREV_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || echo "")
+            BODY=""
+            if [ -n "$PREV_TAG" ]; then
+              BODY="**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
+            fi
+            PRERELEASE_FLAG=""
+            if [[ "$VERSION" == *-* ]]; then
+              PRERELEASE_FLAG="--prerelease"
+            fi
+            gh release create "$TAG" --title "$TAG" --notes "$BODY" --latest $PRERELEASE_FLAG
+          fi
+
+  build-windows:
+    needs: [prepare]
+    if: ${{ github.event_name == 'push' || github.event.inputs.build_target == 'windows' || github.event.inputs.build_target == 'all' }}
+    strategy:
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-2022
+          - architecture: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: |
+          uv python install 3.11
+          uv sync
+
+      - name: Build with PyStand
+        shell: pwsh
+        run: |
+          $VERSION = "${{ needs.prepare.outputs.version }}"
+          echo "VERSION=$VERSION" >> $env:GITHUB_ENV
+          $ARCH = "${{ matrix.architecture }}"
+          # Download PyStand
+          $PYSTAND_URL = "https://github.com/skywind3000/PyStand/releases/download/1.1.5/PyStand-v1.1.5-exe.zip"
+          Invoke-WebRequest -Uri $PYSTAND_URL -OutFile pystand.zip
+          Expand-Archive -Path pystand.zip -DestinationPath pystand_extracted
+          # Find PyStand.exe (may be in subdirectory)
+          $PYSTAND_EXE = Get-ChildItem -Path pystand_extracted -Filter "PyStand.exe" -Recurse | Select-Object -First 1
+          if (-not $PYSTAND_EXE) { throw "PyStand.exe not found in archive" }
+          # Download Python embedded
+          $PYTHON_VERSION = "3.11.9"
+          if ($ARCH -eq "x64") {
+            $PYTHON_EMBED_URL = "https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-embed-amd64.zip"
+          } else {
+            $PYTHON_EMBED_URL = "https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-embed-arm64.zip"
+          }
+          Invoke-WebRequest -Uri $PYTHON_EMBED_URL -OutFile python-embed.zip
+          # Use uv to install dependencies into a temporary venv
+          $TEMP_VENV = ".venv_temp"
+          uv venv $TEMP_VENV --python 3.11
+          uv pip install --python "$TEMP_VENV/Scripts/python.exe" -e .
+          # Build for each entry point (cli and tui)
+          foreach ($entry in @('cli', 'tui')) {
+            $PYSTAND_DIR = "pystand_build_$entry"
+            New-Item -ItemType Directory -Path $PYSTAND_DIR -Force
+            Copy-Item $PYSTAND_EXE.FullName "$PYSTAND_DIR/DanmakuScope.exe"
+            # Extract Python embedded to runtime
+            Expand-Archive -Path python-embed.zip -DestinationPath "$PYSTAND_DIR/runtime"
+            # Install dependencies into site-packages
+            $SITE_PACKAGES = "$PYSTAND_DIR/site-packages"
+            New-Item -ItemType Directory -Path $SITE_PACKAGES -Force
+            # Copy site-packages from temp venv to PyStand site-packages
+            Copy-Item "$TEMP_VENV/Lib/site-packages/*" $SITE_PACKAGES -Recurse -Force
+            # Copy project source (including lexicon) into site-packages
+            Copy-Item "danmaku_analyzer" "$SITE_PACKAGES/danmaku_analyzer" -Recurse -Force
+            # Create static entry script
+            if ($entry -eq 'cli') {
+              $entryScript = "import sys`nimport os`nsys.path.insert(0, os.path.join(os.path.dirname(__file__), 'site-packages'))`nfrom danmaku_analyzer.cli import main`nmain()"
+            } else {
+              $entryScript = "import sys`nimport os`nsys.path.insert(0, os.path.join(os.path.dirname(__file__), 'site-packages'))`nfrom danmaku_analyzer.tui.app import run_tui`nrun_tui()"
+            }
+            $entryScript | Set-Content "$PYSTAND_DIR/_pystand_static.int" -Encoding utf8
+          }
+
+      - name: Package release files
+        if: ${{ github.event_name == 'push' || github.event.inputs.create_release == 'true' }}
+        shell: pwsh
+        run: |
+          $VERSION = "${{ env.VERSION }}"
+          $ARCH = "${{ matrix.architecture }}"
+          foreach ($entry in @('cli', 'tui')) {
+            $base = "DanmakuScope-$VERSION-windows-$ARCH-$entry"
+            $PYSTAND_DIR = "pystand_build_$entry"
+            Compress-Archive -Path "$PYSTAND_DIR/*" -DestinationPath "$base.zip"
+          }
+
+
+
+      - name: Upload to release
+        if: ${{ github.event_name == 'push' || github.event.inputs.create_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $VERSION = "${{ env.VERSION }}"
+          $ARCH = "${{ matrix.architecture }}"
+          $files = @(
+            "DanmakuScope-$VERSION-windows-$ARCH-cli.zip",
+            "DanmakuScope-$VERSION-windows-$ARCH-tui.zip"
+          )
+          gh release upload "v$VERSION" @files --clobber
+
+      - name: Upload artifacts
+        if: ${{ github.event_name != 'push' && github.event.inputs.create_release == 'false' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: DanmakuScope-${{ env.VERSION }}-windows-${{ matrix.architecture }}
+          path: |
+            pystand_build_cli
+            pystand_build_tui
+
+  build-macos:
+    needs: [prepare]
+    if: ${{ github.event_name == 'push' || github.event.inputs.build_target == 'macos' || github.event.inputs.build_target == 'all' }}
+    strategy:
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-14
+          - architecture: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: |
+          uv python install 3.11
+          uv sync
+
+      - name: Build with PyInstaller
+        run: |
+          echo "VERSION=${{ needs.prepare.outputs.version }}" >> "$GITHUB_ENV"
+          # Install PyInstaller
+          uv pip install pyinstaller
+          # Build with PyInstaller using spec file
+          uv run python -m PyInstaller scripts/danmakuscope.spec --distpath Release --workpath Release/build --noconfirm
+
+      - name: Package release files
+        if: ${{ github.event_name == 'push' || github.event.inputs.create_release == 'true' }}
+        run: |
+          VERSION="${{ env.VERSION }}"
+          ARCH="${{ matrix.architecture }}"
+          # Find and package CLI and TUI executables
+          CLI_EXE="$(ls Release | grep -E '^DanmakuScope-.*-cli$' | head -1)"
+          TUI_EXE="$(ls Release | grep -E '^DanmakuScope-.*-tui$' | head -1)"
+          
+          if [ -n "$CLI_EXE" ]; then
+            BASE="DanmakuScope-$VERSION-macos-$ARCH-cli"
+            (cd Release && zip -qr "$BASE.zip" "$CLI_EXE")
+            mv "Release/$BASE.zip" .
+          fi
+          
+          if [ -n "$TUI_EXE" ]; then
+            BASE="DanmakuScope-$VERSION-macos-$ARCH-tui"
+            (cd Release && zip -qr "$BASE.zip" "$TUI_EXE")
+            mv "Release/$BASE.zip" .
+          fi
+
+      - name: Upload to release
+        if: ${{ github.event_name == 'push' || github.event.inputs.create_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ env.VERSION }}"
+          ARCH="${{ matrix.architecture }}"
+          # Upload both CLI and TUI if they exist
+          for entry in cli tui; do
+            FILE="DanmakuScope-$VERSION-macos-$ARCH-$entry.zip"
+            if [ -f "$FILE" ]; then
+              gh release upload "v$VERSION" "$FILE" --clobber
+            fi
+          done
+
+      - name: Upload artifacts
+        if: ${{ github.event_name != 'push' && github.event.inputs.create_release == 'false' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: DanmakuScope-${{ env.VERSION }}-macos-${{ matrix.architecture }}
+          path: |
+            Release/DanmakuScope-*-cli
+            Release/DanmakuScope-*-tui
+
+  build-ubuntu:
+    needs: [prepare]
+    if: ${{ github.event_name == 'push' || github.event.inputs.build_target == 'linux' || github.event.inputs.build_target == 'all' }}
+    strategy:
+      matrix:
+        include:
+          - architecture: x64
+            runner: ubuntu-22.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf zip
+          uv python install 3.11
+          uv sync
+
+      - name: Build with PyInstaller
+        run: |
+          echo "VERSION=${{ needs.prepare.outputs.version }}" >> "$GITHUB_ENV"
+          # Install PyInstaller
+          uv pip install pyinstaller
+          # Build with PyInstaller using spec file
+          uv run python -m PyInstaller scripts/danmakuscope.spec --distpath Release --workpath Release/build --noconfirm
+
+      - name: Package release files
+        if: ${{ github.event_name == 'push' || github.event.inputs.create_release == 'true' }}
+        run: |
+          VERSION="${{ env.VERSION }}"
+          ARCH="${{ matrix.architecture }}"
+          # Find and package CLI and TUI executables
+          CLI_EXE="$(ls Release | grep -E '^DanmakuScope-.*-cli$' | head -1)"
+          TUI_EXE="$(ls Release | grep -E '^DanmakuScope-.*-tui$' | head -1)"
+          
+          if [ -n "$CLI_EXE" ]; then
+            BASE="DanmakuScope-$VERSION-linux-$ARCH-cli"
+            (cd Release && zip -qr "$BASE.zip" "$CLI_EXE")
+            mv "Release/$BASE.zip" .
+          fi
+          
+          if [ -n "$TUI_EXE" ]; then
+            BASE="DanmakuScope-$VERSION-linux-$ARCH-tui"
+            (cd Release && zip -qr "$BASE.zip" "$TUI_EXE")
+            mv "Release/$BASE.zip" .
+          fi
+
+      - name: Upload to release
+        if: ${{ github.event_name == 'push' || github.event.inputs.create_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ env.VERSION }}"
+          ARCH="${{ matrix.architecture }}"
+          # Upload both CLI and TUI if they exist
+          for entry in cli tui; do
+            FILE="DanmakuScope-$VERSION-linux-$ARCH-$entry.zip"
+            if [ -f "$FILE" ]; then
+              gh release upload "v$VERSION" "$FILE" --clobber
+            fi
+          done
+
+      - name: Upload artifacts
+        if: ${{ github.event_name != 'push' && github.event.inputs.create_release == 'false' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: DanmakuScope-${{ env.VERSION }}-linux-${{ matrix.architecture }}
+          path: |
+            Release/DanmakuScope-*-cli
+            Release/DanmakuScope-*-tui
+
+  mirror-cnb:
+    needs: [prepare, build-windows, build-macos, build-ubuntu]
+    if: ${{ always() && (github.event_name == 'push' || github.event.inputs.create_release == 'true') && needs.build-windows.result == 'success' && needs.build-macos.result == 'success' && needs.build-ubuntu.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p assets
+          gh release download "v${VERSION}" --repo ${{ github.repository }} -p "*.zip" -D assets/
+
+      - name: Push artifacts to CNB release branch
+        continue-on-error: true
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [ -z "$CNB_TOKEN" ]; then echo "No CNB_TOKEN, skipping"; exit 0; fi
+          mkdir cnb-mirror && cd cnb-mirror
+          git init -q -b release
+          cp ../assets/* .
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "release: v${VERSION} artifacts"
+          REMOTE="https://cnb:${CNB_TOKEN}@cnb.cool/DanmakuScope/DanmakuScope.git"
+          git push -qf "$REMOTE" release 2>&1 | sed "s/${CNB_TOKEN}/****/g" || true

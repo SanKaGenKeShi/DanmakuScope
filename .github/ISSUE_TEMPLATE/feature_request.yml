@@ -1,0 +1,35 @@
+name: 功能建议 / Feature Request
+description: 提出一个新功能或改进建议 / Propose a new feature or improvement
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本项目定位为**社会语言学/语料库语言学实证研究工具**，功能建议请围绕该定位说明研究场景价值。
+        This project targets sociolinguistics / corpus linguistics research. Please frame your proposal around that use case.
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 使用场景与动机 / Motivation
+      description: 该功能解决什么研究问题？/ What research problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案 / Proposed Solution
+      description: 期望的交互形态（CLI 命令 / TUI 控件 / 产出文件）与示例 / Desired UX (CLI command / TUI widget / output file) with examples
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案 / Alternatives
+      description: 当前如何用现有功能绕过？/ How do you work around this today?
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 范围确认 / Scope Check
+      options:
+        - label: 我了解项目搁置项（tags 聚类、多重比较校正等）不在近期规划内 / I understand the deferred items (tags clustering, multiple-comparison correction, etc.) are not planned

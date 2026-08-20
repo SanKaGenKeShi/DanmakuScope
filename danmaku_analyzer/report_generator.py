@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 # 提示词容量上限：超出则截断并告警（单视频报告按分区×冷热区分组，组数天然少）
 SINGLE_REPORT_MAX_GROUPS = 3
 CORPUS_REPORT_MAX_GROUPS = 12
+CORPUS_REPORT_MAX_TEST_ROWS = 80
 
 
 class AnalysisReportGenerator:
@@ -63,12 +64,13 @@ class AnalysisReportGenerator:
         summary_csv_path: str,
         videos_csv_path: str,
         corpus_metadata: Dict[str, Any],
+        stats_csv_path: Optional[str] = None,
     ) -> Optional[str]:
-        """语料库级比较分析报告：输入为组级聚合表 + 视频级观测表 + 快照元数据"""
+        """语料库级比较分析报告：输入为组级聚合表 + 视频级观测表 + 快照元数据（另可选附推断检验表）"""
         logger.info(f"开始生成语料库级社会语言学比较分析报告，模型: {self.model}")
 
         try:
-            user_prompt = self._build_corpus_user_prompt(summary_csv_path, videos_csv_path, corpus_metadata)
+            user_prompt = self._build_corpus_user_prompt(summary_csv_path, videos_csv_path, corpus_metadata, stats_csv_path)
         except Exception as e:
             logger.error(f"语料库报告输入构建失败: {e}")
             return None
@@ -102,7 +104,7 @@ class AnalysisReportGenerator:
             task = """当前分析对象：B站弹幕跨视频语料库（多个视频、可能跨多个分区的聚合比较数据）。
 
 你的任务是基于提供的语料库级聚合数据，撰写一份严谨、专业的跨分区/跨视频比较分析报告。
-重点在于组间差异的语言学解释（而非单视频描述），并明确指出统计检验结论需以 Kruskal-Wallis/Dunn 等后续验证为准，本报告仅为描述性解读。"""
+重点在于组间差异的语言学解释（而非单视频描述）；输入数据若含推断检验结果（Kruskal-Wallis/逐对 Mann-Whitney U，未校正 p 值），解读时以其为准并注明未校正，本报告为描述性解读。"""
         return f"""你是一位资深的社会语言学家，专注于网络语言和社交媒体语料分析。
 
 {task}
@@ -118,6 +120,7 @@ class AnalysisReportGenerator:
         summary_csv_path: str,
         videos_csv_path: str,
         corpus_metadata: Dict[str, Any],
+        stats_csv_path: Optional[str] = None,
     ) -> str:
         summary_df = pd.read_csv(summary_csv_path, encoding='utf-8-sig')
         videos_df = pd.read_csv(videos_csv_path, encoding='utf-8-sig')
@@ -147,6 +150,10 @@ class AnalysisReportGenerator:
             "组级聚合数据": group_rows,
         }
 
+        test_rows = self._load_test_rows(stats_csv_path)
+        if test_rows:
+            data_summary["推断检验结果"] = test_rows
+
         single_partition = (
             videos_df["tname"].dropna().astype(str).str.strip().nunique() <= 1
             if "tname" in videos_df.columns else False
@@ -163,6 +170,27 @@ class AnalysisReportGenerator:
 ```
 
 请按照报告要求，生成一份完整、专业的社会语言学分析报告。"""
+
+    def _load_test_rows(self, stats_csv_path: Optional[str]) -> List[Dict[str, Any]]:
+        """statistical_tests.csv → 提示词行列表（文件缺失/行数超限截断告警，读失败降级为空不阻断报告）"""
+        if not stats_csv_path or not os.path.exists(stats_csv_path):
+            return []
+        try:
+            tests_df = pd.read_csv(stats_csv_path, encoding='utf-8-sig')
+        except Exception as e:
+            logger.warning(f"推断检验表读取失败，LLM 报告不注入检验结果: {e}")
+            return []
+        if len(tests_df) > CORPUS_REPORT_MAX_TEST_ROWS:
+            logger.warning(
+                f"推断检验行数 {len(tests_df)} 超过提示词容量上限，仅取前 {CORPUS_REPORT_MAX_TEST_ROWS} 行送入 LLM 报告生成"
+            )
+        rows = []
+        for record in tests_df.head(CORPUS_REPORT_MAX_TEST_ROWS).to_dict(orient='records'):
+            rows.append({
+                k: (round(v, 6) if isinstance(v, float) and pd.notna(v) else (None if pd.isna(v) else v))
+                for k, v in record.items()
+            })
+        return rows
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _call_llm(self, system_prompt: str, user_prompt: str) -> str:

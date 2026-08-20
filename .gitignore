@@ -110,3 +110,5 @@ data/logs/*.log
 *.cookie
 
 .tmp_*
+
+Release/

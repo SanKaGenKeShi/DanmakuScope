@@ -92,22 +92,22 @@ def _show_summary(result):
     console.print("[bold green]分析完成！[/bold green]")
     console.print("="*60)
     
-    console.print(f"\n[bold]视频信息[/bold]")
+    console.print("\n[bold]视频信息[/bold]")
     console.print(f"  BV号: {result.bvid}")
     console.print(f"  标题: {result.title}")
     console.print(f"  分区: {result.tname}")
     console.print(f"  标签: {', '.join(result.tags[:5])}")
     
-    console.print(f"\n[bold]分析统计[/bold]")
+    console.print("\n[bold]分析统计[/bold]")
     console.print(f"  时间段数: {result.segments_count}")
     console.print(f"  聚合组数: {result.aggregated_count}")
     
     if result.zip_path and os.path.exists(result.zip_path):
-        console.print(f"\n[bold]报告打包[/bold]")
+        console.print("\n[bold]报告打包[/bold]")
         console.print(f"  ZIP文件: {result.zip_path}")
         console.print(f"  文件大小: {os.path.getsize(result.zip_path) / 1024:.1f} KB")
     else:
-        console.print(f"\n[bold]报告文件[/bold]")
+        console.print("\n[bold]报告文件[/bold]")
         for name, filepath in result.reports.items():
             console.print(f"  {name}: {filepath}")
     
@@ -295,7 +295,7 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_plots:
             result = builder.build_from_index(output)
         else:
             result = builder.build_from_zips(list(zip_list), output)
-        console.print(f"[bold green]语料库聚合完成[/bold green]")
+        console.print("[bold green]语料库聚合完成[/bold green]")
         console.print(f"  聚合表: {result.csv_path}")
         mode_label = "合并分析（单一分区）" if len(result.tnames) <= 1 else f"比对分析（{len(result.tnames)} 个分区）"
         console.print(f"  模式: {mode_label}")
@@ -307,6 +307,7 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_plots:
             console.print(f"[yellow]repro_manifest.json 写出失败（不影响聚合产物）: {e}[/yellow]")
 
         comparison = None
+        stats_csv = None
         if get_settings().ENABLE_CORPUS_STATISTICS:
             from .statistical_validator import StatisticalValidator
             comparison = StatisticalValidator().corpus_compare(result.videos_csv_path)
@@ -323,6 +324,14 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_plots:
         except (OSError, ValueError) as e:
             console.print(f"[yellow]语料库 HTML 报告生成失败（不影响聚合产物）: {e}[/yellow]")
 
+        try:
+            from .reporter import Reporter
+            meth_path = Reporter(output_dir=result.output_dir).generate_corpus_methodology(result, comparison)
+            extra_files.append(meth_path)
+            console.print(f"  方法论描述: {meth_path}")
+        except OSError as e:
+            console.print(f"[yellow]语料库方法论描述生成失败（不影响聚合产物）: {e}[/yellow]")
+
         if with_plots:
             from .corpus_visualizer import CorpusVisualizer
             script_path = CorpusVisualizer().write_script(result.output_dir)
@@ -335,7 +344,7 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_plots:
                 console.print(f"  [dim]运行: python {os.path.basename(script_path)}（需 pip install \"danmaku-analyzer[viz]\"）[/dim]")
 
         if get_settings().ENABLE_LLM_ANALYSIS_REPORT:
-            report_path = asyncio.run(_generate_corpus_llm_report(builder, result))
+            report_path = asyncio.run(_generate_corpus_llm_report(builder, result, stats_csv))
             if report_path:
                 extra_files.append(report_path)
                 console.print(f"  LLM 比较分析报告: {report_path}")
@@ -354,13 +363,13 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_plots:
         sys.exit(1)
 
 
-async def _generate_corpus_llm_report(builder, result) -> Optional[str]:
+async def _generate_corpus_llm_report(builder, result, stats_csv_path: Optional[str] = None) -> Optional[str]:
     """生成语料库级 LLM 比较分析报告并落盘，返回文件路径（失败返回 None）"""
     from .reporter import Reporter
 
     corpus_metadata = builder.build_snapshot_metadata(result)
     return await Reporter(output_dir=result.output_dir).generate_corpus_analysis_report(
-        result.csv_path, result.videos_csv_path, corpus_metadata
+        result.csv_path, result.videos_csv_path, corpus_metadata, stats_csv_path
     )
 
 
@@ -549,7 +558,7 @@ def _show_candidates(candidates):
         for c in videos:
             table.add_row(c.bvid, c.title, f"{c.play:,}", f"{c.danmaku_count:,}", c.pubdate)
         console.print(table)
-        console.print(f"  [dim]挑选后可执行: danmaku-analyzer analyze <BV号>[/dim]")
+        console.print("  [dim]挑选后可执行: danmaku-analyzer analyze <BV号>[/dim]")
 
 
 @cli.command()

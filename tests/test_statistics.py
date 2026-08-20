@@ -82,6 +82,17 @@ class TestKruskalWallis:
         assert row["p_value"] == pytest.approx(1.0)
         assert "退化" in row["note"]
 
+    def test_epsilon_squared_matches_formula(self, validator):
+        groups = {"A": [1.0, 2.0, 3.0, 4.0], "B": [5.0, 6.0, 7.0, 8.0], "C": [3.0, 4.0, 5.0, 6.0]}
+        row = validator.kruskal_wallis_test(groups, "content_word_density")
+        expected_h, _ = stats.kruskal(groups["A"], groups["B"], groups["C"])
+        # ε² = (H - k + 1) / (n - k) = (H - 2) / 9
+        assert row["effect_size"] == pytest.approx(max(0.0, (expected_h - 2) / 9), abs=1e-4)
+
+    def test_epsilon_squared_degenerate_zero(self, validator):
+        row = validator.kruskal_wallis_test({"A": [1.0, 1.0], "B": [1.0, 1.0]}, "m")
+        assert row["effect_size"] == 0.0
+
 
 class TestPairwiseMannWhitney:
 
@@ -208,6 +219,24 @@ class TestPluralModes:
         assert len(df[df["test_type"] == "Kruskal-Wallis"]) == len(SCALAR_FIELDS)
         mwu = df[df["test_type"] == "Mann-Whitney U"]
         assert {(r["group1"], r["group2"]) for r in mwu.to_dict("records")} == {("2023", "2024")}
+
+    def test_temporal_axis_note_suffix(self, validator, tmp_path):
+        rows = [self._make_row(f"BV1a{i}", "游戏", 0.3 + i * 0.05, time_period="2023") for i in range(3)]
+        rows += [self._make_row(f"BV1b{i}", "游戏", 0.6 + i * 0.05, time_period="2024") for i in range(3)]
+        csv_path = write_videos_csv(tmp_path, rows)
+        df = validator.corpus_compare(csv_path).to_dataframe()
+        tests = df[df["test_type"].isin(["Kruskal-Wallis", "Mann-Whitney U"])]
+        assert not tests.empty
+        assert tests["note"].astype(str).str.contains("检验轴：时段").all()
+
+    def test_partition_axis_note_has_no_suffix(self, validator, tmp_path):
+        rows = [self._make_row(f"BV1g{i}", "游戏", 0.3 + i * 0.05) for i in range(3)]
+        rows += [self._make_row(f"BV1m{i}", "音乐", 0.6 + i * 0.05) for i in range(3)]
+        csv_path = write_videos_csv(tmp_path, rows)
+        df = validator.corpus_compare(csv_path).to_dataframe()
+        tests = df[df["test_type"].isin(["Kruskal-Wallis", "Mann-Whitney U"])]
+        assert not tests.empty
+        assert not tests["note"].astype(str).str.contains("检验轴").any()
 
     def test_single_partition_no_axis_emits_note(self, validator, tmp_path):
         rows = [self._make_row(f"BV1a{i}", "游戏", 0.3 + i * 0.05) for i in range(3)]

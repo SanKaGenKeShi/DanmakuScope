@@ -2,7 +2,6 @@
 输入解析器单元测试
 """
 
-import asyncio
 from danmaku_analyzer.utils.input_parser import InputParser, InputType, ParsedInput
 
 

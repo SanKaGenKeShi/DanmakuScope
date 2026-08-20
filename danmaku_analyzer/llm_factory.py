@@ -22,6 +22,12 @@ def _check_api_key(name: str, api_key: str) -> None:
         logger.warning(f"{name} 未配置（当前为占位值），请在 .env 中设置真实 Key")
 
 
+def _check_base_url(name: str, base_url: str) -> None:
+    """Base URL 空值检测：连接三件套默认空（v0.3.8-beta），未配置时提前告警，避免请求期才报无效 URL"""
+    if not base_url:
+        logger.warning(f"{name} 未配置（为空），请在首启向导/设置页或 .env 中填写；LLM 调用将会失败")
+
+
 def create_async_client(base_url: str, api_key: str, timeout: float = 60.0) -> AsyncOpenAI:
     """空 key（本地推理后端如 Ollama）以 ollama 约定哑值构造，openai SDK 拒绝空串凭证"""
     return AsyncOpenAI(base_url=base_url, api_key=api_key or "ollama", timeout=timeout)
@@ -99,6 +105,7 @@ def create_backend(base_url: str, api_key: str, timeout: float = 60.0) -> LLMBac
 def complex_backend(timeout: float = 60.0) -> LLMBackend:
     """复杂任务双路推理后端（COMPLEX_LLM 独立连接配置）"""
     cfg = get_llm_settings()
+    _check_base_url("COMPLEX_LLM_BASE_URL", cfg.COMPLEX_LLM_BASE_URL)
     _check_api_key("COMPLEX_LLM_API_KEY", cfg.COMPLEX_LLM_API_KEY)
     return create_backend(cfg.COMPLEX_LLM_BASE_URL, cfg.COMPLEX_LLM_API_KEY, timeout)
 
@@ -106,6 +113,7 @@ def complex_backend(timeout: float = 60.0) -> LLMBackend:
 def simple_backend(timeout: float = 60.0) -> LLMBackend:
     """简单任务后端（SIMPLE_LLM 独立连接配置）"""
     cfg = get_llm_settings()
+    _check_base_url("SIMPLE_LLM_BASE_URL", cfg.SIMPLE_LLM_BASE_URL)
     _check_api_key("SIMPLE_LLM_API_KEY", cfg.SIMPLE_LLM_API_KEY)
     return create_backend(cfg.SIMPLE_LLM_BASE_URL, cfg.SIMPLE_LLM_API_KEY, timeout)
 
@@ -113,9 +121,10 @@ def simple_backend(timeout: float = 60.0) -> LLMBackend:
 def analysis_report_backend(timeout: float = 120.0) -> LLMBackend:
     """分析报告后端（ANALYSIS_REPORT_LLM 独立连接配置）"""
     cfg = get_llm_settings()
+    _check_base_url("ANALYSIS_REPORT_LLM_BASE_URL", cfg.ANALYSIS_REPORT_LLM_BASE_URL)
     _check_api_key("ANALYSIS_REPORT_LLM_API_KEY", cfg.ANALYSIS_REPORT_LLM_API_KEY)
     return create_backend(
-        cfg.ANALYSIS_REPORT_LLM_BASE_URL or "https://api.openai.com/v1",
+        cfg.ANALYSIS_REPORT_LLM_BASE_URL,
         cfg.ANALYSIS_REPORT_LLM_API_KEY,
         timeout,
     )

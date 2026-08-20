@@ -65,10 +65,12 @@ class Exporter:
                 df = self._read_csv_bytes(zipf.read(CORPUS_SUMMARY_FILENAME))
                 if fmt == "latex":
                     parts = [self.to_latex_table(df, "语料库级比较表", "tab:corpus_summary")]
+                    if STATS_TESTS_FILENAME in names:
+                        parts.append(self.stats_to_latex(self._read_csv_bytes(zipf.read(STATS_TESTS_FILENAME))))
                 else:
                     parts = [self.to_apa_text(df)]
-                if STATS_TESTS_FILENAME in names:
-                    parts.append(self.stats_to_apa(self._read_csv_bytes(zipf.read(STATS_TESTS_FILENAME))))
+                    if STATS_TESTS_FILENAME in names:
+                        parts.append(self.stats_to_apa(self._read_csv_bytes(zipf.read(STATS_TESTS_FILENAME))))
                 return "\n\n".join(parts)
 
             if fmt == "latex":
@@ -125,6 +127,13 @@ class Exporter:
         lines += ["\\toprule", header, "\\midrule", *body, "\\bottomrule", "\\end{tabular}", "\\end{table}"]
         return "\n".join(lines)
 
+    def stats_to_latex(self, stats_df: pd.DataFrame) -> str:
+        """statistical_tests.csv → booktabs 检验结果表（混合 dtype 空值归一为 --，与 APA 文本同源不重复计算）"""
+        df = stats_df.copy()
+        for col in df.columns:
+            df[col] = df[col].map(lambda v: "" if pd.isna(v) else v)
+        return self.to_latex_table(df, "语料库级推断统计检验结果（未校正 p 值）", "tab:statistical_tests")
+
     def to_apa_text(self, df: pd.DataFrame) -> str:
         """APA 风格描述统计文本：*_mean/*_std 配对优先，其余数值列按 M (SD) 报告"""
         paragraphs = []
@@ -172,16 +181,19 @@ class Exporter:
         return f"{float(value):.3f}"
 
     def stats_to_apa(self, stats_df: pd.DataFrame) -> str:
-        """statistical_tests.csv → APA 推断统计文本（KW 总检验 + 逐对 MWU + 样本不足说明，均标注未校正）"""
+        """statistical_tests.csv → APA 推断统计文本（KW 总检验 + 逐对 MWU + 冷热区配对 Wilcoxon + note 注记 + 样本不足说明，均标注未校正）"""
         lines = []
         kw_rows = stats_df[stats_df["test_type"] == "Kruskal-Wallis"]
         for _, row in kw_rows.iterrows():
             if pd.isna(row.get("p_value")):
                 lines.append(f"指标 {row['metric']}：样本量不足，未执行 Kruskal-Wallis 检验（{row.get('note', '')}）。")
                 continue
+            axis_word = "时段" if "检验轴：时段" in str(row.get("note", "")) else "分区"
+            kw_effect = row.get("effect_size")
+            kw_effect_text = f"，ε² = {self._apa_num(kw_effect)}" if pd.notna(kw_effect) and str(kw_effect).strip() != "" else ""
             lines.append(
-                f"指标 {row['metric']} 在分区间存在差异检验：Kruskal-Wallis H = {self._apa_num(row['statistic'])}，"
-                f"p {self._apa_p(row['p_value'])}（未校正 p 值）。"
+                f"指标 {row['metric']} 的{axis_word}间差异检验：Kruskal-Wallis H = {self._apa_num(row['statistic'])}，"
+                f"p {self._apa_p(row['p_value'])}{kw_effect_text}（未校正 p 值）。"
             )
 
         status_rows = stats_df[
@@ -200,6 +212,22 @@ class Exporter:
                     f"  {row['group1']} vs {row['group2']}：U = {self._apa_num(row['statistic'])}，"
                     f"p {self._apa_p(row['p_value'])}{effect}。"
                 )
+
+        wilcoxon = stats_df[stats_df["test_type"] == "Wilcoxon 符号秩（配对）"]
+        if not wilcoxon.empty:
+            lines.append("冷热区配对比较（Wilcoxon 符号秩检验，未校正 p 值）：")
+            for _, row in wilcoxon.iterrows():
+                effect = f"，Cliff's δ = {self._apa_num(row['effect_size'])}（{row['effect_magnitude']}）" if pd.notna(row.get("effect_size")) else ""
+                lines.append(
+                    f"  指标 {row['metric']}：{row['group1']} vs {row['group2']}（n = {int(float(row['n1']))} 对）："
+                    f"W = {self._apa_num(row['statistic'])}，p {self._apa_p(row['p_value'])}{effect}。"
+                )
+
+        note_rows = stats_df[stats_df["test_type"] == "note"]
+        for _, row in note_rows.iterrows():
+            note = str(row.get("note", "")).strip()
+            if note:
+                lines.append(f"注：{note}。")
         return "\n".join(lines)
 
     @staticmethod

@@ -911,10 +911,18 @@ async def compare_videos(
         logger.warning(f"语料库 HTML 报告写出失败，跳过该产出: {e}")
         progress("语料库聚合", f"警告：语料库 HTML 报告写出失败（{e}），已跳过")
 
+    try:
+        meth_path = Reporter(output_dir=build_result.output_dir).generate_corpus_methodology(build_result, comparison)
+        extra_files.append(meth_path)
+        progress("语料库聚合", "语料库方法论描述已生成")
+    except OSError as e:
+        logger.warning(f"语料库方法论描述写出失败，跳过该产出: {e}")
+        progress("语料库聚合", f"警告：语料库方法论描述写出失败（{e}），已跳过")
+
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
         corpus_metadata = builder.build_snapshot_metadata(build_result)
         llm_report_path = await Reporter(output_dir=build_result.output_dir).generate_corpus_analysis_report(
-            build_result.csv_path, build_result.videos_csv_path, corpus_metadata
+            build_result.csv_path, build_result.videos_csv_path, corpus_metadata, result.statistics_csv_path
         )
         if llm_report_path:
             extra_files.append(llm_report_path)

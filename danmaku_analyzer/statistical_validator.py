@@ -267,27 +267,31 @@ class StatisticalValidator:
             return False, f"样本量不足 ({sample_size} < {min_size})，跳过置信区间，标记为 insufficient_sample"
 
     def kruskal_wallis_test(self, groups: Dict[str, List[float]], metric: str) -> Optional[Dict]:
-        """Kruskal-Wallis H 检验（scipy），返回未校正 p 值的 CSV 行；可检验分组 < 2 返回 None"""
+        """Kruskal-Wallis H 检验（scipy）+ ε² 效应量，返回未校正 p 值的 CSV 行；可检验分组 < 2 返回 None"""
         names = sorted(groups)
         if len(names) < 2:
             return None
         samples = [groups[name] for name in names]
+        n_total = sum(len(s) for s in samples)
+        k = len(samples)
         if len({v for s in samples for v in s}) <= 1:
-            statistic, p_value = 0.0, 1.0
+            statistic, p_value, effect_size = 0.0, 1.0, 0.0
             note = UNCORRECTED_P_NOTE + "；全部观测值相同，检验退化"
         else:
             statistic, p_value = stats.kruskal(*samples)
+            # ε² = (H - k + 1) / (n - k)，负值截断 0；每组观测 >= 2 时分母恒正，否则退化为 0
+            effect_size = round(max(0.0, (float(statistic) - k + 1) / (n_total - k)), 4) if n_total > k else 0.0
             note = UNCORRECTED_P_NOTE
         return {
             "metric": metric,
             "test_type": "Kruskal-Wallis",
             "group1": "",
             "group2": "",
-            "n1": sum(len(s) for s in samples),
+            "n1": n_total,
             "n2": "",
             "statistic": round(float(statistic), 4),
             "p_value": round(float(p_value), 6),
-            "effect_size": "",
+            "effect_size": effect_size,
             "effect_magnitude": "",
             "note": note,
         }
@@ -455,6 +459,8 @@ class StatisticalValidator:
             })
 
         if len(valid) >= 2:
+            # 时段轴在 note 追加检验轴标注，供导出端措辞区分（分区间/时段间）
+            axis_note_suffix = "" if groupby_col == "tname" else "；检验轴：时段"
             sub = df[df[groupby_col].astype(str).isin(valid)]
             for metric in SCALAR_FIELDS:
                 if metric not in sub.columns:
@@ -468,8 +474,12 @@ class StatisticalValidator:
                     continue
                 kw_row = self.kruskal_wallis_test(groups, metric)
                 if kw_row:
+                    kw_row["note"] += axis_note_suffix
                     rows.append(kw_row)
-                rows.extend(self.pairwise_mann_whitney(groups, metric))
+                mwu_rows = self.pairwise_mann_whitney(groups, metric)
+                for mwu_row in mwu_rows:
+                    mwu_row["note"] += axis_note_suffix
+                rows.extend(mwu_rows)
             logger.info(f"语料库级推断检验完成: 按{axis_label}分组 {len(valid)} 个有效组，{len(rows)} 行结果（未校正 p 值）")
         else:
             logger.warning(f"有效{axis_label}不足（{len(valid)} < 2，门槛：每组视频数 >= {min_videos}），未执行组间检验")

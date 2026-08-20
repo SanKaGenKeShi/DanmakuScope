@@ -7,7 +7,7 @@ import os
 import json
 import csv
 import shutil
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional
 from datetime import datetime
 
 import pandas as pd
@@ -175,13 +175,14 @@ class Reporter:
         summary_csv_path: str,
         videos_csv_path: str,
         corpus_metadata: Dict,
+        stats_csv_path: Optional[str] = None,
     ) -> Optional[str]:
         """语料库级 LLM 比较分析报告（与单视频报告共用同一生成入口）"""
         from .report_generator import AnalysisReportGenerator
     
         report_gen = AnalysisReportGenerator()
         return await self._run_llm_report(
-            lambda: report_gen.generate_corpus_report(summary_csv_path, videos_csv_path, corpus_metadata),
+            lambda: report_gen.generate_corpus_report(summary_csv_path, videos_csv_path, corpus_metadata, stats_csv_path),
             "corpus_analysis_report.md", "语料库LLM分析报告"
         )
     
@@ -198,6 +199,12 @@ class Reporter:
             "total_danmaku": int(videos_df["danmaku_count"].sum()) if "danmaku_count" in videos_df.columns else 0,
         }
         return HtmlReportGenerator(self.output_dir).write_corpus(summary_df, tests_df, metadata)
+
+    def generate_corpus_methodology(self, build_result, comparison=None) -> str:
+        """语料库级方法论描述（corpus_methodology.md），渲染委派 CorpusMethodologyGenerator"""
+        from .corpus_methodology import CorpusMethodologyGenerator
+
+        return CorpusMethodologyGenerator(self.output_dir).write(build_result, comparison)
     
     def generate_methodology(self, metadata: Dict, sampling: Optional[Dict] = None) -> str:
         """方法论描述（methodology.md）随报告入包，渲染委派 MethodologyGenerator"""

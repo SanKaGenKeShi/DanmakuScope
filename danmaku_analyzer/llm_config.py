@@ -61,16 +61,17 @@ class LLMSettings(BaseSettings):
     """LLM 配置中心，从环境变量或 .env 文件加载 LLM 配置"""
 
     # 复杂语用任务（情感、合作原则、互动类型、正字法）
+    # 连接三件套默认空：占位示范值不可用且需先清空再输入，改空值由首启向导/设置页直接填写
     COMPLEX_LLM_BASE_URL: str = Field(
-        default="https://api.openai.com/v1", 
-        description="复杂任务 LLM 基础 URL"
+        default="",
+        description="复杂任务 LLM 基础 URL（默认空，需经 .env 或设置界面填写）"
     )
     COMPLEX_LLM_API_KEY: str = Field(
-        default="sk-xxx", 
-        description="复杂任务 LLM API Key"
+        default="",
+        description="复杂任务 LLM API Key（本地推理后端可留空）"
     )
     COMPLEX_LLM_MODEL: str = Field(
-        default="gpt-4o-mini", 
+        default="",
         description="复杂任务 LLM 模型",
         json_schema_extra={"reproducible": True}
     )
@@ -92,15 +93,15 @@ class LLMSettings(BaseSettings):
     
     # 简单句类任务（sentence_function）
     SIMPLE_LLM_BASE_URL: str = Field(
-        default="https://api.deepseek.com/v1", 
-        description="简单任务 LLM 基础 URL"
+        default="",
+        description="简单任务 LLM 基础 URL（默认空，需经 .env 或设置界面填写）"
     )
     SIMPLE_LLM_API_KEY: str = Field(
-        default="sk-yyy", 
-        description="简单任务 LLM API Key"
+        default="",
+        description="简单任务 LLM API Key（本地推理后端可留空）"
     )
     SIMPLE_LLM_MODEL: str = Field(
-        default="deepseek-chat", 
+        default="",
         description="简单任务 LLM 模型",
         json_schema_extra={"reproducible": True}
     )
@@ -120,18 +121,18 @@ class LLMSettings(BaseSettings):
         json_schema_extra={"reproducible": True}
     )
     
-    # 分析报告生成任务，独立配置（不再留空复用 COMPLEX_LLM；占位值表示未配置）
+    # 分析报告生成任务，独立配置（不再留空复用 COMPLEX_LLM）
     ANALYSIS_REPORT_LLM_BASE_URL: str = Field(
-        default="https://api.openai.com/v1", 
-        description="分析报告 LLM 基础 URL（独立配置，需自行填写）"
+        default="",
+        description="分析报告 LLM 基础 URL（独立配置，默认空，需经 .env 或设置界面填写）"
     )
     ANALYSIS_REPORT_LLM_API_KEY: str = Field(
-        default="sk-zzz", 
-        description="分析报告 LLM API Key（独立配置，需自行填写）"
+        default="",
+        description="分析报告 LLM API Key（独立配置，本地推理后端可留空）"
     )
     ANALYSIS_REPORT_LLM_MODEL: str = Field(
-        default="gpt-4o-mini", 
-        description="分析报告 LLM 模型（独立配置，需自行填写）",
+        default="",
+        description="分析报告 LLM 模型（独立配置）",
         json_schema_extra={"reproducible": True}
     )
     ANALYSIS_REPORT_LLM_TEMPERATURE: float = Field(

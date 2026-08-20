@@ -26,7 +26,7 @@ def make_metadata():
         "bvid": "BV1test", "title": "测试视频", "tname": "游戏",
         "tags": ["弹幕"], "pubdate": "2025-01-01T00:00:00",
         "view_count": 10000, "danmaku_count": 100, "danmaku_source": "protobuf",
-        "pipeline_version": "0.3.7-beta", "prompt_version": "v2.3.0",
+        "pipeline_version": "0.3.8-beta", "prompt_version": "v2.3.0",
         "generated_at": "2026-08-19T12:00:00",
     }
 

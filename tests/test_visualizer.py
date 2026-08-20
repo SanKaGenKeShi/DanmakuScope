@@ -61,7 +61,7 @@ class TestRenderRScript:
 
     def test_reads_precomputed_statistics_only_no_recompute(self, visualizer):
         script = visualizer.render_r_script()
-        assert f'read.csv(stats_path' in script
+        assert 'read.csv(stats_path' in script
         assert 'test_type == "Kruskal-Wallis"' in script
         # 检验由 Python 侧预计算，R 脚本不得重复计算
         assert "kruskal.test(" not in script
@@ -92,6 +92,13 @@ class TestRenderRScript:
     def test_r_braces_balanced(self, visualizer):
         script = visualizer.render_r_script()
         assert script.count("{") == script.count("}")
+
+    def test_wilcoxon_and_temporal_consumed(self, visualizer):
+        """配对 Wilcoxon 与时段轴进图：检验行读取 + 冷热区配对图 + 时段自适应"""
+        script = visualizer.render_r_script()
+        assert 'test_type == "Wilcoxon 符号秩（配对）"' in script
+        assert "corpus_zone_paired" in script
+        assert "time_period" in script
 
 
 class TestWriteRScript:
@@ -174,6 +181,13 @@ class TestRenderPythonScript:
 
     def test_generated_script_compiles(self, visualizer):
         compile(visualizer.render_python_script(), "<template>", "exec")
+
+    def test_wilcoxon_and_temporal_consumed(self, visualizer):
+        """配对 Wilcoxon 与时段轴进图：检验行读取 + 冷热区配对图 + 时段自适应"""
+        script = visualizer.render_python_script()
+        assert 'test_type"] == "Wilcoxon 符号秩（配对）"' in script
+        assert 'savefig("corpus_zone_paired.png"' in script
+        assert "time_period" in script
 
 
 class TestWritePythonScript:

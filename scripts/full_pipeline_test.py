@@ -11,7 +11,6 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 from danmaku_analyzer.pipeline import analyze_video
-from danmaku_analyzer.utils.logger import setup_logger
 from danmaku_analyzer.config import get_settings
 
 import logging
@@ -30,14 +29,14 @@ async def full_pipeline_test():
     print("="*60)
     print("DanmakuScope - 全流程测试")
     print("="*60)
-    print(f"LLM配置:")
+    print("LLM配置:")
     print(f"  复杂任务: {settings.llm.COMPLEX_LLM_MODEL} @ {settings.llm.COMPLEX_LLM_BASE_URL}")
     print(f"  简单任务: {settings.llm.SIMPLE_LLM_MODEL} @ {settings.llm.SIMPLE_LLM_BASE_URL}")
     print(f"分析策略: 频次最高的前 {settings.TOP_N} 条弹幕")
     if settings.ENABLE_LLM_ANALYSIS_REPORT:
         print(f"LLM分析报告: 已启用 (模型: {settings.llm.ANALYSIS_REPORT_LLM_MODEL})")
     else:
-        print(f"LLM分析报告: 未启用")
+        print("LLM分析报告: 未启用")
     print("="*60)
     
     bvid = "BV1Ha41187qw"

@@ -74,6 +74,18 @@ class TestBackendProtocol:
         assert a.base_url != b.base_url
 
 
+class TestConnectionDefaults:
+    """连接三件套默认空（v0.3.8-beta）：占位示范值不可用，初始留空由用户直接填写"""
+
+    def test_connection_fields_default_empty(self):
+        from danmaku_analyzer.llm_config import LLMSettings
+        fields = ("COMPLEX_LLM_BASE_URL", "COMPLEX_LLM_API_KEY", "COMPLEX_LLM_MODEL",
+                  "SIMPLE_LLM_BASE_URL", "SIMPLE_LLM_API_KEY", "SIMPLE_LLM_MODEL",
+                  "ANALYSIS_REPORT_LLM_BASE_URL", "ANALYSIS_REPORT_LLM_API_KEY", "ANALYSIS_REPORT_LLM_MODEL")
+        for name in fields:
+            assert LLMSettings.model_fields[name].default == "", name
+
+
 class TestBackendComplete:
 
     def _backend_with_fake_client(self, content):

@@ -1,0 +1,74 @@
+name: Bug 报告 / Bug Report
+description: 报告一个缺陷 / Report a defect
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量提供完整信息以便定位问题。
+        Thanks for the report. Please provide as much detail as possible.
+  - type: dropdown
+    id: entry
+    attributes:
+      label: 使用入口 / Entry
+      options:
+        - TUI（终端界面）
+        - CLI（命令行）
+        - Windows 可执行包（PyStand）
+        - macOS / Linux 可执行包（Nuitka）
+        - 源码安装（pip install .）
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本号 / Version
+      description: "`danmaku-analyzer version` 的输出，或 Release 压缩包文件名中的版本 / Output of `danmaku-analyzer version`, or version in the release zip name"
+      placeholder: "0.3.8-beta"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统 / OS
+      placeholder: "Windows 11 25H2 / macOS 15 arm64 / Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: 终端 / Terminal
+      description: TUI 相关问题请提供终端类型与版本（可选）/ For TUI issues, provide terminal type and version (optional)
+      placeholder: "Windows Terminal 1.21 / iTerm2 / GNOME Terminal"
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤 / Steps to Reproduce
+      description: 包含完整命令与参数 / Include the full command and options
+      placeholder: |
+        1. 执行 `danmaku-analyzer analyze BVxxxxxx`
+        2. ……
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为与实际行为 / Expected vs Actual
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志摘录 / Log Excerpt
+      description: |
+        日志位于 `~/.danmaku-scope/logs/danmaku_analyzer.log`，可只贴相关片段。
+        Logs are at `~/.danmaku-scope/logs/danmaku_analyzer.log`; paste only the relevant part.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私确认 / Privacy Check
+      options:
+        - label: 我确认提交内容不含 API Key、SESSDATA 等凭证信息 / I confirm no API keys, SESSDATA or other credentials are included
+          required: true

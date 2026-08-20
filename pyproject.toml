@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "danmaku-analyzer"
-version = "0.3.7-beta"
+version = "0.3.8-beta"
 description = "DanmakuScope - B站弹幕社会语言学分析工具"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -58,6 +58,11 @@ danmaku-tui = "danmaku_analyzer.tui.app:run_tui"
 
 [tool.setuptools.packages.find]
 include = ["danmaku_analyzer*"]
+
+[tool.setuptools.package-data]
+# 词典与报告规范为运行时只读资源（硬性指令 #4 词典强制加载/#11 报告规范注入），
+# 非 editable 安装时必须随 wheel 分发，否则 jieba 自定义词典缺失（v0.3.8-beta 修复）
+danmaku_analyzer = ["lexicon/*.txt", "lexicon/*.md", ".env.example"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

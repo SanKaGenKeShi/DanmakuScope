@@ -822,7 +822,6 @@ class DanmakuTUI(App):
             import ctypes
 
             CF_UNICODETEXT = 13
-            GMEM_MOVEABLE = 0x0002
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
 

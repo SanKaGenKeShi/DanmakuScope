@@ -210,7 +210,7 @@ class HtmlReportGenerator:
         parts = [
             "<!DOCTYPE html>",
             '<html lang="zh-CN"><head><meta charset="utf-8">',
-            f"<title>语料库分析报告</title>",
+            "<title>语料库分析报告</title>",
             f"<style>{_CSS}</style></head><body><div class='container'>",
             hero,
             cards_html,
