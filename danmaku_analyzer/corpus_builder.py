@@ -5,6 +5,7 @@
 
 import io
 import json
+import math
 import os
 import zipfile
 from collections import defaultdict
@@ -34,12 +35,13 @@ TABLE_SPECS = {
     "table_emotion.csv": ["cooperative_principle_violation_rate"],
     "table_sentence_function.csv": [],
     "table_interaction_type.csv": [],
+    "table_orthography.csv": [],
 }
 
-# tname/zone_type/danmaku_count 为维度列；共识 CI 三列为组级诊断信息（样本不足时含字符串
-# 'insufficient_sample'），非分布观测，均不参与加权合并
 NON_DIST_COLUMNS = {
-    "tname", "zone_type", "danmaku_count",
+    "tname", "zone_type", "danmaku_count", "_source_table",
+    "total_word_count", "total_char_count", "label_weight_sum", "valid_label_count",
+    "llm_record_count", "failed_record_count", "degraded_record_count",
     "high_consensus_ci_lower", "high_consensus_ci_upper", "high_consensus_ci_status",
 }
 
@@ -70,16 +72,16 @@ class CorpusManifest(BaseModel):
 
 
 def validate_zip_archive(zip_path: str, expected_count: int) -> bool:
-    """ZIP 完整性校验：存在非空 + 条目数一致 + 首个条目可读"""
+    """校验非空 ZIP 的全部成员、条目数与 CRC。"""
     if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
         return False
     try:
         with zipfile.ZipFile(zip_path, 'r') as zipf:
-            names = zipf.namelist()
-            if len(names) != expected_count:
+            members = zipf.infolist()
+            if not members or len(members) != expected_count:
                 return False
-            if names:
-                zipf.read(names[0])
+            for member in members:
+                zipf.read(member)
             return True
     except Exception:
         return False
@@ -95,7 +97,11 @@ class VideoSummary:
     zone_type: Optional[str]  # zone_policy=all 时保留分区信息，其余为 None
     danmaku_count: int = 0
     scalars: Dict[str, float] = field(default_factory=dict)
-    distributions: Dict[str, float] = field(default_factory=dict)  # 列名（含前缀）→ 占比
+    distributions: Dict[str, float] = field(default_factory=dict)  # 保留源表原有列名与前缀
+    denominators: Dict[str, float] = field(default_factory=dict)
+    distribution_sources: Dict[str, str] = field(default_factory=dict)
+    legacy_denominators: set = field(default_factory=set)
+    warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -219,27 +225,32 @@ class CorpusBuilder:
 
         summaries = []
         for zone_label, rows in zone_groups:
-            merged = self._merge_rows(rows)
-            summaries.append(VideoSummary(
+            summary = VideoSummary(
                 bvid=bvid,
                 tname=tname,
                 pubdate=metadata.get("pubdate", ""),
                 prompt_version=metadata.get("prompt_version", ""),
                 zone_type=zone_label,
-                danmaku_count=int(merged.pop("danmaku_count", 0)),
-                scalars={k: merged.pop(k, 0.0) for k in SCALAR_FIELDS},
-                distributions=merged,
-            ))
+            )
+            for zone in sorted({row["zone_type"] for row in rows}):
+                present_tables = {row["_source_table"] for row in rows if row["zone_type"] == zone}
+                for filename in sorted(TABLE_SPECS.keys() - present_tables):
+                    self._warn(f"视频 {bvid} {zone} 缺少表 {filename}，相关指标保留缺失", summary.warnings)
+            merged = self._merge_rows(rows, summary)
+            summary.danmaku_count = int(merged.pop("danmaku_count", 0))
+            summary.scalars = {k: merged.pop(k, float("nan")) for k in SCALAR_FIELDS}
+            summary.distributions = merged
+            summaries.append(summary)
         return summaries
 
     def _collect_zone_rows(self, tables: Dict[str, pd.DataFrame]) -> Dict[str, Dict[str, Dict]]:
         """把各表行按 zone_type 归拢：zone → {表名: 行dict}"""
         per_zone = defaultdict(dict)
         for filename, df in tables.items():
-            if "zone_type" not in df.columns:
+            if filename not in TABLE_SPECS or "zone_type" not in df.columns:
                 continue
             for _, row in df.iterrows():
-                per_zone[row["zone_type"]][filename] = row.to_dict()
+                per_zone[row["zone_type"]][filename] = {**row.to_dict(), "_source_table": filename}
         return per_zone
 
     def _apply_zone_policy(self, per_zone: Dict, policy: str, bvid: str) -> List[Tuple[Optional[str], List[Dict]]]:
@@ -255,45 +266,120 @@ class CorpusBuilder:
         # all：两区各保留，语料库行带 zone_type 维度
         return [(zone, list(zone_rows.values())) for zone, zone_rows in sorted(per_zone.items())]
 
-    def _merge_rows(self, rows: List[Dict]) -> Dict[str, float]:
-        """按 danmaku_count 加权合并同视频多行（表间按列名合并，权重为各自行弹幕数）"""
-        actual_total = sum(max(r.get("danmaku_count", 0), 0) for r in rows)
-        merged = {}
-        if actual_total <= 0:
-            logger.warning("合并行弹幕数为 0，退化为等权平均")
-            weights = [1.0] * len(rows)
-        else:
-            weights = [max(r.get("danmaku_count", 0), 0) for r in rows]
-
-        all_columns = set()
-        for r in rows:
-            all_columns.update(r.keys())
-
-        # 同一 zone 在多张表中重复携带 danmaku_count，按 zone 去重后求和才是视频真实弹幕数
+    def _merge_rows(self, rows: List[Dict], summary: Optional[VideoSummary] = None) -> Dict[str, float]:
+        """仅在各指标的来源表内按有效分母合并；稀疏类别补零，缺表和无效分母保留缺失。"""
+        issues = summary.warnings if summary is not None else []
+        by_table = defaultdict(list)
         zone_counts = {}
-        for r in rows:
-            zone = r.get("zone_type", "")
-            zone_counts[zone] = max(zone_counts.get(zone, 0), max(r.get("danmaku_count", 0), 0))
-        merged["danmaku_count"] = sum(zone_counts.values())
-        for col in all_columns:
-            if col in NON_DIST_COLUMNS:
-                continue
-            values = []
-            for r, w in zip(rows, weights):
-                raw = r.get(col)
-                if pd.isna(raw):
+        for row in rows:
+            by_table[row.get("_source_table", "")].append(row)
+            zone = row.get("zone_type", "")
+            count = self._finite_number(row.get("danmaku_count"))
+            zone_counts[zone] = max(zone_counts.get(zone, 0), count or 0)
+        merged = {"danmaku_count": sum(zone_counts.values())}
+
+        for filename, table_rows in by_table.items():
+            columns = set().union(*(row.keys() for row in table_rows)) - NON_DIST_COLUMNS
+            for scalar in TABLE_SPECS.get(filename, []):
+                if scalar not in columns:
+                    self._warn(f"表 {filename} 缺少必要指标 {scalar}，保留缺失", issues)
+            if filename in TABLE_SPECS and filename != "table_consensus_stats.csv" and not (columns - set(SCALAR_FIELDS)):
+                self._warn(f"表 {filename} 缺少分布指标，相关分类保留缺失", issues)
+            weights_by_column = {}
+            for column in sorted(columns):
+                denominator = self._denominator_column(filename, column)
+                key = f"{filename}:{denominator}"
+                if denominator not in weights_by_column:
+                    weights = []
+                    for row in table_rows:
+                        if denominator not in row:
+                            self._warn(
+                                f"表 {filename or '未知来源'} 缺少分母 {denominator}，"
+                                "按旧口径 danmaku_count 兼容估计，不能精确重聚合", issues,
+                            )
+                            if summary is not None:
+                                summary.legacy_denominators.add(key)
+                            raw_weight = row.get("danmaku_count")
+                        else:
+                            raw_weight = row[denominator]
+                        weight = self._finite_number(raw_weight)
+                        if weight is None or weight <= 0:
+                            self._warn(f"表 {filename} 分母 {denominator} 无效或为 0，相关观测保留缺失", issues)
+                            weight = 0.0
+                        weights.append(weight)
+                    weights_by_column[denominator] = weights
+                    if summary is not None:
+                        summary.denominators[key] = sum(weights)
+                weights = weights_by_column[denominator]
+                is_category = column not in SCALAR_FIELDS and not column.startswith("hard_")
+                values = []
+                invalid_column = False
+                for row, weight in zip(table_rows, weights):
+                    if weight <= 0:
+                        continue
+                    raw = row.get(column)
+                    value = self._finite_number(raw)
+                    if value is None:
+                        if raw is None or pd.isna(raw):
+                            if not is_category:
+                                self._warn(f"表 {filename} 指标 {column} 缺失，排除该观测", issues)
+                                continue
+                            family_columns = [name for name in columns if name not in SCALAR_FIELDS and not name.startswith("hard_") and self._distribution_family(name) == self._distribution_family(column)]
+                            if not any(self._finite_number(row.get(name)) is not None for name in family_columns):
+                                self._warn(f"表 {filename} 分类 {self._distribution_family(column) or '标签'} 全部缺失，排除该观测", issues)
+                                continue
+                            value = 0.0
+                        elif not is_category:
+                            self._warn(f"表 {filename} 指标 {column} 无效，排除该观测", issues)
+                            continue
+                        else:
+                            self._warn(f"列 {column} 含非数值内容，不参与语料库聚合", issues)
+                            invalid_column = True
+                            break
+                    values.append((value, weight))
+                if invalid_column:
                     continue
-                try:
-                    values.append((float(raw), w))
-                except (TypeError, ValueError):
-                    # 未知字符串列（如旧版 ZIP 携带的诊断字段）不视为分布，跳过并告警
-                    logger.warning(f"列 {col} 含非数值内容，不参与语料库聚合")
-                    values = None
-                    break
-            if not values:
-                continue
-            merged[col] = sum(float(v) * w for v, w in values) / sum(w for _, w in values)
+                weight_sum = sum(weight for _, weight in values)
+                merged[column] = sum(value * weight for value, weight in values) / weight_sum if weight_sum > 0 else float("nan")
+                if summary is not None:
+                    summary.denominators[f"metric:{column}"] = weight_sum
+                    if column not in SCALAR_FIELDS:
+                        summary.distribution_sources[column] = filename
+                        if is_category:
+                            summary.denominators[f"distribution:{filename}:{self._distribution_family(column)}"] = weight_sum
         return merged
+
+    @staticmethod
+    def _distribution_family(column: str) -> str:
+        return next((prefix for prefix in ("pos_", "syllable_", "soft_") if column.startswith(prefix)), "labels")
+
+    @staticmethod
+    def _denominator_column(filename: str, column: str) -> str:
+        if column == "punctuation_emoji_rate":
+            return "danmaku_count"
+        if filename == "table_lexical_by_partition.csv":
+            return "total_word_count"
+        if filename == "table_consensus_stats.csv":
+            return "llm_record_count"
+        if filename == "table_orthography.csv" and column.startswith("hard_"):
+            return "total_char_count"
+        if filename in {"table_emotion.csv", "table_sentence_function.csv", "table_interaction_type.csv", "table_orthography.csv"}:
+            return "label_weight_sum"
+        return "danmaku_count"
+
+    @staticmethod
+    def _finite_number(value) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    @staticmethod
+    def _warn(message: str, issues: List[str]):
+        if message not in issues:
+            logger.warning(message)
+            issues.append(message)
 
     def _aggregate_and_write(
         self,
@@ -304,9 +390,19 @@ class CorpusBuilder:
         if not summaries:
             raise ValueError("无可聚合的视频摘要（请检查 ZIP 是否包含 metadata.json 与聚合表）")
 
+        warnings = []
+        unique = {}
+        for summary in summaries:
+            key = (summary.bvid, summary.zone_type)
+            if key in unique:
+                self._warn(f"重复视频观测 {summary.bvid} ({summary.zone_type or '合并'})，保留首条，不增加视频数", warnings)
+                continue
+            unique[key] = summary
+        summaries = list(unique.values())
         self._check_prompt_versions(summaries)
 
-        rows, warnings = self._aggregate_groups(summaries)
+        rows, group_warnings = self._aggregate_groups(summaries)
+        warnings = list(dict.fromkeys(warnings + [issue for s in summaries for issue in s.warnings] + group_warnings))
 
         settings = get_settings()
         out_dir = settings.resolve_data_path(output_dir or settings.OUTPUT_DIR)
@@ -340,12 +436,16 @@ class CorpusBuilder:
             groups[key].append(s)
 
         warnings: List[str] = []
+        legacy_keys = set().union(*(s.legacy_denominators for s in summaries))
+        for key in sorted(legacy_keys):
+            if any(key in s.denominators and key not in s.legacy_denominators for s in summaries):
+                self._warn(f"语料库混合新旧分母 {key}，旧报告使用弹幕数代理权重，结果为兼容估计，不能精确重聚合", warnings)
         rows = []
         for (tname, time_period, zone_type), items in sorted(groups.items()):
+            items = list({s.bvid: s for s in reversed(items)}.values())
             if len(items) < min_videos:
-                msg = f"分区 {tname}{f'({time_period})' if time_period else ''} 视频数 {len(items)} < {min_videos}，结果仅供参考"
-                logger.warning(msg)
-                warnings.append(msg)
+                msg = f"分区 {tname}{f'({time_period})' if time_period else ''}{f'/{zone_type}' if zone_type else ''} 视频数 {len(items)} < {min_videos}，结果仅供参考"
+                self._warn(msg, warnings)
             rows.append(self._aggregate_group(tname, time_period, zone_type, items))
         return rows, warnings
 
@@ -461,6 +561,7 @@ class CorpusBuilder:
         settings = get_settings()
         temporal = settings.ENABLE_TEMPORAL_GROUPING
         records = []
+        sources = {column: source for s in summaries for column, source in s.distribution_sources.items()}
         for s in summaries:
             record = {
                 "bvid": s.bvid, "tname": s.tname, "pubdate": s.pubdate,
@@ -470,6 +571,10 @@ class CorpusBuilder:
             }
             record.update(s.scalars)
             record.update(s.distributions)
+            for column, source in sources.items():
+                key = f"distribution:{source}:{self._distribution_family(column)}"
+                if column not in record and not column.startswith("hard_") and s.denominators.get(key, 0) > 0:
+                    record[column] = 0.0
             records.append(record)
         pd.DataFrame(records).to_csv(filepath, index=False, encoding='utf-8-sig')
         logger.info(f"视频级观测表已保存: {filepath}（{len(records)} 行）")
@@ -505,7 +610,8 @@ class CorpusBuilder:
         return filepath
 
     def _aggregate_group(self, tname: str, time_period: str, zone_type: str, items: List[VideoSummary]) -> Dict:
-        """组级聚合：标量取视频级均值/标准差，分布按弹幕数加权均值"""
+        """标量保持有效视频均值/标准差，分布沿用各来源表的有效分母。"""
+        items = list({s.bvid: s for s in reversed(items)}.values())
         row: Dict = {"tname": tname}
         if time_period:
             row["time_period"] = time_period
@@ -515,17 +621,28 @@ class CorpusBuilder:
         row["total_danmaku"] = sum(s.danmaku_count for s in items)
 
         for name in SCALAR_FIELDS:
-            values = [s.scalars.get(name, 0.0) for s in items]
-            row[f"{name}_mean"] = float(pd.Series(values).mean())
-            row[f"{name}_std"] = float(pd.Series(values).std(ddof=1)) if len(values) > 1 else 0.0
+            values = [value for s in items if (value := self._finite_number(s.scalars.get(name))) is not None]
+            row[f"{name}_mean"] = float(pd.Series(values, dtype=float).mean())
+            row[f"{name}_std"] = float(pd.Series(values, dtype=float).std(ddof=1)) if len(values) != 1 else 0.0
 
-        total_weight = sum(s.danmaku_count for s in items) or 1
-        dist_columns = set()
-        for s in items:
-            dist_columns.update(s.distributions.keys())
+        dist_columns = set().union(*(s.distributions for s in items))
         for col in sorted(dist_columns):
-            weighted = sum(s.distributions.get(col, 0.0) * s.danmaku_count for s in items)
-            row[f"{col}_mean"] = weighted / total_weight
+            source = next((s.distribution_sources[col] for s in items if col in s.distribution_sources), None)
+            key = f"distribution:{source}:{self._distribution_family(col)}" if source is not None else None
+            values = []
+            for summary in items:
+                value = self._finite_number(summary.distributions.get(col))
+                weight = summary.denominators.get(f"metric:{col}")
+                if col not in summary.distributions and key in summary.denominators and not col.startswith("hard_"):
+                    value = 0.0
+                    weight = summary.denominators[key]
+                elif value is not None and weight is None:
+                    weight = summary.danmaku_count
+                    self._warn(f"视频 {summary.bvid} 指标 {col} 无分母信息，按弹幕数兼容估计，不能精确重聚合", summary.warnings)
+                if value is not None and weight is not None and weight > 0:
+                    values.append((value, weight))
+            total_weight = sum(weight for _, weight in values)
+            row[f"{col}_mean"] = sum(value * weight for value, weight in values) / total_weight if total_weight > 0 else float("nan")
         return row
 
     def _check_prompt_versions(self, summaries: List[VideoSummary]):
@@ -544,7 +661,10 @@ class CorpusBuilder:
             fields = {}
             for name in DIFF_FIELDS:
                 old, new = obs_a[bvid].get(name), obs_b[bvid].get(name)
-                if isinstance(old, float) and isinstance(new, float):
+                if pd.isna(old) or pd.isna(new):
+                    if pd.isna(old) != pd.isna(new):
+                        fields[name] = {"old": old, "new": new}
+                elif isinstance(old, float) and isinstance(new, float):
                     if abs(old - new) > DIFF_NUMERIC_TOLERANCE:
                         fields[name] = {"old": old, "new": new}
                 elif old != new:
@@ -584,7 +704,7 @@ class CorpusBuilder:
             obs["danmaku_count"] = int(group["danmaku_count"].sum()) if "danmaku_count" in group.columns else 0
             for name in SCALAR_FIELDS:
                 if name in group.columns:
-                    obs[name] = float(pd.to_numeric(group[name], errors="coerce").mean() or 0.0)
+                    obs[name] = float(pd.to_numeric(group[name], errors="coerce").mean())
             observations[str(bvid)] = obs
         return observations
 

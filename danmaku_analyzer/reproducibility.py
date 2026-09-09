@@ -25,21 +25,28 @@ REPRO_MANIFEST_FILENAME = "repro_manifest.json"
 class ReproManifestBuilder:
     """可复现 manifest 构建：解释器/平台/依赖版本/白名单配置快照，写出 repro_manifest.json"""
 
-    def build(self) -> Dict:
-        """完整运行环境快照；流水线无随机采样组件，LLM 随机性由 config_snapshot 中的温度参数刻画"""
+    def build(self, overrides: dict | None = None) -> Dict:
+        """运行环境与白名单内的实际生效参数。"""
+        snapshot = self.reproducible_config_snapshot()
+        if overrides:
+            unknown = set(overrides) - set(snapshot)
+            if unknown:
+                raise ValueError("运行参数覆盖包含非可复现白名单字段")
+            snapshot.update(overrides)
         return {
             "generated_at": datetime.now().isoformat(timespec='seconds'),
             "pipeline_version": __version__,
             "python_version": sys.version,
             "platform": platform.platform(),
             "package_versions": self.collect_package_versions(),
-            "config_snapshot": self.reproducible_config_snapshot(),
+            "config_snapshot": snapshot,
         }
 
-    def write(self, output_dir: str) -> str:
+    def write(self, output_dir: str, overrides: dict | None = None) -> str:
         filepath = os.path.join(output_dir, REPRO_MANIFEST_FILENAME)
+        manifest = self.build(overrides)
         with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(self.build(), f, ensure_ascii=False, indent=2)
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
         logger.info(f"可复现 manifest 已保存: {filepath}")
         return filepath
 

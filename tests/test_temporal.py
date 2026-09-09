@@ -11,11 +11,17 @@ from io import StringIO
 import pandas as pd
 import pytest
 
+import danmaku_analyzer.config as config_module
 import danmaku_analyzer.corpus_builder as corpus_builder_module
 import danmaku_analyzer.corpus_store as corpus_store_module
 from danmaku_analyzer.config import get_settings
 from danmaku_analyzer.corpus_builder import CorpusBuilder
 from danmaku_analyzer.statistical_validator import StatisticalValidator
+
+
+@pytest.fixture(autouse=True)
+def isolated_settings(monkeypatch, tmp_path):
+    monkeypatch.setattr(config_module, "_settings", config_module.Settings.model_construct(DATA_ROOT=str(tmp_path)))
 
 
 def write_table_csv(zipf: zipfile.ZipFile, filename: str, rows: list):
@@ -123,6 +129,32 @@ class TestTemporalAggregation:
 
 
 class TestTemporalStatisticsIntegration:
+
+    @pytest.mark.parametrize("video_count", [2, 3])
+    def test_temporal_between_tests_keep_zones_separate(self, tmp_path, video_count):
+        rows = []
+        for period in ("2024", "2025"):
+            for index in range(video_count):
+                for zone in ("hot_zone", "cold_zone"):
+                    rows.append({
+                        "bvid": f"BV{period}{index}", "tname": "游戏", "time_period": period,
+                        "zone_type": zone, "content_word_density": 0.3 + index * 0.1,
+                    })
+        path = tmp_path / "corpus_videos.csv"
+        pd.DataFrame(rows + rows[:2]).to_csv(path, index=False)
+        frame = StatisticalValidator().corpus_compare(str(path)).to_dataframe()
+        status = frame[(frame["test_type"] == "sample_status") & (frame["metric"] == "")]
+        assert set(status["group1"]) == {"2024", "2025"}
+        assert len(status) == 4
+        assert set(status["n1"]) == {video_count}
+        tests = frame[frame["test_type"] == "Mann-Whitney U"]
+        if video_count < 3:
+            assert tests.empty
+        else:
+            assert len(tests) == 2
+            assert set(tests["n1"]) == set(tests["n2"]) == {3}
+            assert tests["note"].str.contains("检验轴：时段").all()
+            assert tests["note"].str.contains("冷热区分层").all()
 
     def test_corpus_compare_stratifies_by_tname_with_temporal_on(self, tmp_path, tmp_store, temporal_on):
         for i in range(3):

@@ -41,7 +41,7 @@ def cli(debug: bool, log_level: str):
 @click.option('--output', '-o', default=None, help='输出目录')
 @click.option('--credential', '-c', default=None, help='B站登录凭证文件（JSON：sessdata/bili_jct/buvid3）')
 @click.option('--freq-based', is_flag=True, default=False, help='启用按频次排序采样（默认使用每段前N条）')
-@click.option('--top-n', default=None, type=int, help='频次排序时取前N条（默认10）')
+@click.option('--top-n', default=None, type=click.IntRange(min=1), help='频次排序时取前N条（默认10）')
 @click.option('--no-cache', is_flag=True, default=False, help='禁用爬取缓存，强制重新获取')
 def analyze(input_str: str, output: Optional[str], credential: Optional[str], freq_based: bool, top_n: Optional[int], no_cache: bool):
     """分析单个视频"""
@@ -82,7 +82,11 @@ async def _analyze_async(
     # 空结果视为失败（如全部 LLM 调用失败），以退出码反映真实状态
     if not result.zip_valid:
         raise RuntimeError(f"分析未产生有效报告: {input_str}")
-    
+    if getattr(result, "analysis_status", "ok") == "failed":
+        raise RuntimeError(f"LLM 标注全部失败；原始数据与硬统计已保存: {result.zip_path}")
+    if getattr(result, "analysis_status", "ok") == "degraded":
+        console.print("[yellow]部分标注降级或缺失，请查看报告中的有效标注数与失败状态。[/yellow]")
+
     _show_summary(result)
     return result
 
@@ -119,7 +123,7 @@ def _show_summary(result):
 @click.option('--output', '-o', default=None, help='输出目录')
 @click.option('--credential', '-c', default=None, help='B站登录凭证文件（JSON：sessdata/bili_jct/buvid3）')
 @click.option('--freq-based', is_flag=True, default=False, help='启用按频次排序采样（默认使用每段前N条）')
-@click.option('--top-n', default=None, type=int, help='频次排序时取前N条（默认10）')
+@click.option('--top-n', default=None, type=click.IntRange(min=1), help='频次排序时取前N条（默认10）')
 @click.option('--no-cache', is_flag=True, default=False, help='禁用爬取缓存，强制重新获取')
 def batch(input_list: tuple, output: Optional[str], credential: Optional[str], freq_based: bool, top_n: Optional[int], no_cache: bool):
     """批量分析多个视频"""

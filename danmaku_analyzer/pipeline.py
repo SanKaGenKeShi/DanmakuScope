@@ -10,7 +10,7 @@ import asyncio
 import functools
 import json
 import os
-import zipfile
+import shutil
 from collections import Counter
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
@@ -28,10 +28,11 @@ from .prompt_builder import PromptBuilder
 from .llm_client import LLMClient
 from .aggregator import Aggregator, DanmakuRecord, AggregatedData
 from .reporter import Reporter
+from .report_archive import ReportArchive
 from .reproducibility import ReproManifestBuilder
 from .statistical_validator import StatisticalValidator
 from .cache_manager import get_cache_manager
-from .corpus_builder import METADATA_FILENAME, CorpusBuilder, validate_zip_archive
+from .corpus_builder import CorpusBuilder
 from .corpus_store import CorpusStore
 from .utils.input_parser import InputParser, InputType
 from .utils.logger import get_logger
@@ -57,6 +58,7 @@ class AnalysisResult:
     reports: dict
     zip_path: Optional[str] = None
     zip_valid: bool = False
+    analysis_status: str = "ok"
 
 
 @dataclass
@@ -70,6 +72,10 @@ class PipelineOptions:
     use_freq_based: bool = False
     use_top_n: int = 10
     use_output_dir: str = ""
+
+    def __post_init__(self):
+        if isinstance(self.use_top_n, bool) or not isinstance(self.use_top_n, int) or self.use_top_n <= 0:
+            raise ValueError("use_top_n 必须为正整数")
 
 
 @dataclass
@@ -94,6 +100,26 @@ class SegmentAnalysisOutput:
     records: List[DanmakuRecord] = field(default_factory=list)
     sample_danmaku: List[DanmakuItem] = field(default_factory=list)
     sample_segments: List[TimeSegment] = field(default_factory=list)
+
+    @property
+    def status_summary(self) -> Dict:
+        counts = Counter(
+            record.llm_result.analysis_status
+            if any(value is not None for value in record.llm_result.output.to_dict().values())
+            else "failed"
+            for record in self.records
+        )
+        total = len(self.records)
+        failed = counts["failed"]
+        degraded = counts["degraded"]
+        status = "failed" if failed == total else "degraded" if failed or degraded else "ok"
+        return {
+            "analysis_status": status,
+            "analysis_sample_count": total,
+            "failed_sample_count": failed,
+            "degraded_sample_count": degraded,
+            "valid_label_sample_count": total - failed,
+        }
 
 
 @dataclass
@@ -131,13 +157,9 @@ async def analyze_video(
     pre = await _stage_preprocess(crawl, options.progress)
     analysis = await _stage_analyze_segments(pre, options)
 
-    if not analysis.records:
-        options.progress("弹幕分析", "警告：所有 LLM 分析均失败，无有效记录")
-        return AnalysisResult(
-            bvid=bvid, title=crawl.meta.title, tname=pre.social_vars.tname,
-            tags=pre.social_vars.tags, segments_count=len(pre.segments),
-            aggregated_count=0, reports={}, zip_path=None, zip_valid=False
-        )
+    analysis_status = analysis.status_summary["analysis_status"]
+    if analysis_status == "failed":
+        options.progress("弹幕分析", "警告：所有 LLM 标签均不可用，仍保存完整原始弹幕与硬统计档案")
 
     aggregated = await _stage_aggregate(analysis.records, settings, options.progress)
     report = await _stage_report(bvid, crawl, pre, analysis, aggregated, options)
@@ -146,7 +168,8 @@ async def analyze_video(
         bvid=bvid, title=crawl.meta.title, tname=pre.social_vars.tname,
         tags=pre.social_vars.tags, segments_count=len(pre.segments),
         aggregated_count=len(aggregated), reports=report.reports,
-        zip_path=report.zip_path if report.zip_valid else None, zip_valid=report.zip_valid
+        zip_path=report.zip_path if report.zip_valid else None, zip_valid=report.zip_valid,
+        analysis_status=analysis_status,
     )
 
 
@@ -256,13 +279,17 @@ async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOption
     ])
 
     async def _analyze_one(danmaku, segment, segment_danmaku, hard_metrics, segment_idx):
-        context = context_provider.get_context(danmaku, segment, segment_danmaku)
-        context_text = context.to_prompt_text()
-        complex_prompt = prompt_builder.build_complex_prompt(
-            social_vars.tname, social_vars.tags, danmaku.content, context_text
-        )
-        simple_prompt = prompt_builder.build_simple_prompt(danmaku.content)
-        llm_result = await llm_client.analyze(complex_prompt, simple_prompt)
+        try:
+            context = context_provider.get_context(danmaku, segment, segment_danmaku)
+            context_text = context.to_prompt_text()
+            complex_prompt = prompt_builder.build_complex_prompt(
+                social_vars.tname, social_vars.tags, danmaku.content, context_text
+            )
+            simple_prompt = prompt_builder.build_simple_prompt(danmaku.content)
+            llm_result = await llm_client.analyze(complex_prompt, simple_prompt)
+        except Exception as error:
+            logger.error(f"段 {segment_idx} 单条 LLM 分析失败，保留缺失标签记录: {error}")
+            llm_result = llm_client.failed_result(prompt_builder.prompt_version)
         return DanmakuRecord(
             tname=social_vars.tname, zone_type=segment.zone_type,
             tags=social_vars.tags, hard_metrics=hard_metrics,
@@ -280,6 +307,8 @@ async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOption
         )
         simple_prompt = prompt_builder.build_simple_prompt_batch([d.content for d in sample_danmaku])
         llm_results = await llm_client.analyze_batch(complex_prompt, simple_prompt, len(sample_danmaku))
+        if len(llm_results) != len(sample_danmaku):
+            raise ValueError("批量分析结果数与采样数不一致")
         return [
             DanmakuRecord(
                 tname=social_vars.tname, zone_type=segment.zone_type,
@@ -295,16 +324,10 @@ async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOption
             return await _analyze_segment_batch(sample_danmaku, segment, segment_danmaku, hard_metrics, segment_idx)
         except Exception as e:
             logger.warning(f"段 {segment_idx} 批量推理失败，回退逐条模式: {e}")
-            results = await asyncio.gather(*[
+            return await asyncio.gather(*[
                 _analyze_one(d, segment, segment_danmaku, hard_metrics, segment_idx)
                 for d in sample_danmaku
-            ], return_exceptions=True)
-            records = []
-            for result in results:
-                if isinstance(result, Exception):
-                    raise result
-                records.append(result)
-            return records
+            ])
 
     # 采样：频次去重 TOP_N 或每段前 N 条
     segment_samples = []
@@ -324,7 +347,7 @@ async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOption
 
     # 所有段的采样与 LLM 任务一次性提交，由 LLMClient 实例级信号量限速，避免段间串行空等
     tasks = []
-    task_samples = []  # 与 tasks 一一对应：(样本弹幕列表, 所属段)，批量模式下列表含整段样本
+    task_samples = []  # 与 tasks 一一对应：(样本弹幕列表, 所属段, 段索引)
     batch_mode = settings.ENABLE_BATCH_SEGMENT_ANALYSIS
     for i, segment in enumerate(segments):
         sample_danmaku = segment_samples[i]
@@ -333,37 +356,41 @@ async def _stage_analyze_segments(pre: PreprocessOutput, options: PipelineOption
             tasks.append(_analyze_segment(
                 sample_danmaku, segment, segment_danmaku_lists[i], hard_metrics, i
             ))
-            task_samples.append((sample_danmaku, segment))
+            task_samples.append((sample_danmaku, segment, i))
         else:
             for d in sample_danmaku:
                 tasks.append(_analyze_one(d, segment, segment_danmaku_lists[i], hard_metrics, i))
-                task_samples.append(([d], segment))
+                task_samples.append(([d], segment, i))
 
     request_unit = "段" if batch_mode else "条"
     progress("弹幕分析", f"已提交 {len(tasks)} 个 LLM 分析任务（按{request_unit}计，并发上限 {settings.LLM_CONCURRENCY}）")
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # 同步过滤：仅登记成功结果对应的样本，保证 records 与样本一一对应（防止 kappa_ready 错位）
     output = SegmentAnalysisOutput()
-    fail_count = 0
-    for result, (sample_list, segment) in zip(results, task_samples):
+    for result, (sample_list, segment, segment_idx) in zip(results, task_samples):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
         if isinstance(result, Exception):
-            fail_count += len(sample_list)
-            logger.error(f"LLM 分析失败: {result}")
-        elif isinstance(result, list):
-            output.records.extend(result)
-            output.sample_danmaku.extend(sample_list)
-            output.sample_segments.extend([segment] * len(sample_list))
-        else:
-            output.records.append(result)
-            output.sample_danmaku.append(sample_list[0])
-            output.sample_segments.append(segment)
+            logger.error(f"LLM 分析任务失败，保留全部对应样本: {result}")
+            result = [
+                DanmakuRecord(
+                    tname=social_vars.tname, zone_type=segment.zone_type,
+                    tags=social_vars.tags, hard_metrics=hard_metrics_list[segment_idx],
+                    llm_result=llm_client.failed_result(prompt_builder.prompt_version),
+                    segment_id=segment_idx,
+                )
+                for _ in sample_list
+            ]
+        output.records.extend(result if isinstance(result, list) else [result])
+        output.sample_danmaku.extend(sample_list)
+        output.sample_segments.extend([segment] * len(sample_list))
 
-    if fail_count:
-        progress("弹幕分析", f"分析完成: {len(output.records)} 成功，{fail_count} 失败")
-    else:
-        progress("弹幕分析", f"分析完成: {len(output.records)} 条全部成功")
-
+    summary = output.status_summary
+    progress(
+        "弹幕分析",
+        f"分析完成: {len(output.records)} 条记录，"
+        f"{summary['failed_sample_count']} 失败，{summary['degraded_sample_count']} 降级（全部样本保留）",
+    )
     return output
 
 
@@ -417,7 +444,9 @@ def _sanitize_zip_filename(title: str) -> str:
 
 
 def _build_kappa_records(analysis: SegmentAnalysisOutput) -> List[Dict]:
-    """构建 kappa_ready 记录（records 与样本已在阶段 4 同步过滤，一一对应）"""
+    """构建含失败样本的 kappa_ready 记录，拒绝样本错位或静默截断。"""
+    if not len(analysis.records) == len(analysis.sample_danmaku) == len(analysis.sample_segments):
+        raise ValueError("LLM 记录与原始样本、分段未一一对应")
     records = []
     for record, danmaku, seg in zip(analysis.records, analysis.sample_danmaku, analysis.sample_segments):
         records.append({
@@ -428,6 +457,10 @@ def _build_kappa_records(analysis: SegmentAnalysisOutput) -> List[Dict]:
             "zone_type": record.zone_type,
             "consensus_level": record.llm_result.consensus_level.value,
             "weight_multiplier": record.llm_result.weight_multiplier,
+            "analysis_status": record.llm_result.analysis_status,
+            "requested_paths": record.llm_result.requested_paths,
+            "successful_paths": record.llm_result.successful_paths,
+            "sentence_function_source": record.llm_result.sentence_function_source,
             "llm_output": record.llm_result.output.to_dict(),
         })
     return records
@@ -458,7 +491,13 @@ def _write_supplementary_reports(
         logger.warning(f"methodology.md 写出失败，跳过该产出: {e}")
         progress("报告生成", f"警告：methodology.md 写出失败（{e}），已跳过")
     try:
-        reports["repro_manifest"] = ReproManifestBuilder().write(reporter.output_dir)
+        reports["repro_manifest"] = ReproManifestBuilder().write(
+            reporter.output_dir,
+            overrides={
+                "TOP_N": options.use_top_n,
+                "ENABLE_FREQ_BASED_SAMPLING": options.use_freq_based,
+            },
+        )
     except OSError as e:
         logger.warning(f"repro_manifest.json 写出失败，跳过该产出: {e}")
         progress("报告生成", f"警告：repro_manifest.json 写出失败（{e}），已跳过")
@@ -493,43 +532,50 @@ def _build_quality_metrics(records: List[DanmakuRecord]) -> Dict:
     return {"dual_path_samples": len(paired), "cohen_kappa": kappas}
 
 
-def _package_reports_zip(reports: dict, zip_path: str, progress: ProgressCallback) -> bool:
-    """ZIP 打包 + 完整性校验；校验通过后清理散落源文件，写入异常/报告缺失时保留源文件返回失败"""
-    missing = [name for name, path in reports.items() if not os.path.exists(path)]
-    if missing:
-        logger.warning(f"报告文件缺失，仍尝试打包已有文件: {missing}")
-    if len(missing) == len(reports):
-        logger.error(f"全部报告文件缺失，放弃打包: {zip_path}")
-        progress("报告打包", f"打包失败: {os.path.basename(zip_path)}（报告文件缺失，源文件保留）")
-        return False
+def _package_reports_zip(
+    reports: dict,
+    zip_path: str,
+    progress: ProgressCallback,
+    expected_bvid: Optional[str] = None,
+    source_dir: Optional[str] = None,
+) -> bool:
+    """原子打包并校验报告；失败保留中间文件，成功仅清理本次工作目录或显式源文件。"""
+    archive = ReportArchive(zip_path, expected_bvid)
     try:
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for name, path in reports.items():
-                if os.path.exists(path):
-                    zipf.write(path, os.path.basename(path))
-    except OSError as e:
-        logger.error(f"报告打包失败（源文件保留）: {zip_path} - {e}")
-        progress("报告打包", f"打包失败: {os.path.basename(zip_path)}（源文件保留）")
+        if source_dir is not None:
+            source_root = os.path.realpath(source_dir)
+            for path in reports.values():
+                if os.path.commonpath([source_root, os.path.realpath(path)]) != source_root:
+                    raise ValueError("报告源文件不属于本次工作目录")
+            if os.path.commonpath([source_root, os.path.realpath(zip_path)]) == source_root:
+                raise ValueError("正式 ZIP 不能位于待清理的工作目录内")
+        archive.package(reports)
+    except Exception as error:
+        locations = sorted({os.path.abspath(os.path.dirname(path)) for path in reports.values()})
+        if source_dir is not None:
+            locations = [source_dir]
+        if archive.temporary_path:
+            locations.append(archive.temporary_path)
+        retained = "、".join(locations) or os.path.dirname(os.path.abspath(zip_path))
+        logger.error(f"报告打包失败: {zip_path} - {error}；中间文件保留于: {retained}")
+        progress("报告打包", f"打包失败: {error}；中间文件保留于: {retained}")
         return False
 
-    zip_valid = validate_zip_archive(
-        zip_path,
-        sum(1 for path in reports.values() if os.path.exists(path)),
-    )
-    zip_filename = os.path.basename(zip_path)
-    if zip_valid:
-        deleted_count = 0
-        for name, path in reports.items():
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                    deleted_count += 1
-                except Exception as e:
-                    logger.warning(f"删除失败: {os.path.basename(path)} - {e}")
-        progress("报告打包", f"打包完成: {zip_filename} (已删除{deleted_count}个源文件)")
+    if source_dir is not None:
+        try:
+            shutil.rmtree(source_dir)
+        except OSError as error:
+            logger.warning(f"报告已归档，但工作目录清理失败: {source_dir} - {error}")
+            progress("报告打包", f"报告已归档，中间文件仍保留于: {source_dir}")
     else:
-        progress("报告打包", f"打包完成: {zip_filename} (源文件保留)")
-    return zip_valid
+        for path in reports.values():
+            try:
+                os.remove(path)
+            except OSError as error:
+                logger.warning(f"报告已归档，但源文件清理失败: {path} - {error}")
+                progress("报告打包", f"报告已归档，源文件仍保留于: {path}")
+    progress("报告打包", f"打包完成: {os.path.basename(zip_path)}（完整性校验通过）")
+    return True
 
 
 async def _stage_report(
@@ -545,62 +591,66 @@ async def _stage_report(
     progress = options.progress
 
     progress("报告生成", "正在生成报告...")
-    reporter = Reporter(output_dir=options.use_output_dir)
-
-    video_metadata = {
-        "bvid": bvid, "title": crawl.meta.title,
-        "tname": pre.social_vars.tname, "tags": pre.social_vars.tags,
-        "pubdate": crawl.meta.pubdate.isoformat(),
-        "view_count": crawl.meta.view_count,
-        "danmaku_count": len(crawl.danmaku_list),
-        "danmaku_source": crawl.danmaku_source,
-        "pipeline_version": __version__,
-        "batch_segment_analysis": options.settings.ENABLE_BATCH_SEGMENT_ANALYSIS,
-    }
-    quality_metrics = _build_quality_metrics(analysis.records)
-    if quality_metrics:
-        video_metadata["quality_metrics"] = quality_metrics
-    reports = reporter.generate_reports(
-        aggregated, kappa_records=_build_kappa_records(analysis), metadata=video_metadata
-    )
+    report_dir = ReportArchive.create_workspace(options.use_output_dir, bvid)
     try:
+        reporter = Reporter(output_dir=report_dir)
+        video_metadata = {
+            "bvid": bvid, "title": crawl.meta.title,
+            "tname": pre.social_vars.tname, "tags": pre.social_vars.tags,
+            "pubdate": crawl.meta.pubdate.isoformat(),
+            "view_count": crawl.meta.view_count,
+            "danmaku_count": len(crawl.danmaku_list),
+            "danmaku_source": crawl.danmaku_source,
+            "pipeline_version": __version__,
+            "batch_segment_analysis": options.settings.ENABLE_BATCH_SEGMENT_ANALYSIS,
+            "sampling": {"top_n": options.use_top_n, "freq_based": options.use_freq_based},
+            **analysis.status_summary,
+        }
+        quality_metrics = _build_quality_metrics(analysis.records)
+        if quality_metrics:
+            video_metadata["quality_metrics"] = quality_metrics
+        reports = reporter.generate_reports(
+            aggregated, kappa_records=_build_kappa_records(analysis), metadata=video_metadata
+        )
         reports["danmaku_raw"] = reporter.generate_raw_danmaku(crawl.danmaku_list)
-    except OSError as e:
-        logger.warning(f"原始弹幕表写出失败，跳过该产出: {e}")
-        progress("报告生成", f"警告：原始弹幕表写出失败（{e}），已跳过")
-    reports.update(_write_supplementary_reports(reporter, video_metadata, options, progress))
-    progress("报告生成", "报告生成完成")
+        reports.update(_write_supplementary_reports(reporter, video_metadata, options, progress))
+        progress("报告生成", "报告生成完成")
 
-    llm_report_md = None
-    if settings.ENABLE_LLM_ANALYSIS_REPORT:
-        progress("LLM报告", "正在生成社会语言学分析报告...")
-        llm_report_path = await reporter.generate_llm_analysis_report(aggregated, metadata=video_metadata)
-        if llm_report_path:
-            reports["sociolinguistic_analysis_report"] = llm_report_path
-            progress("LLM报告", "社会语言学分析报告生成完成")
-            try:
-                with open(llm_report_path, encoding='utf-8') as f:
-                    llm_report_md = f.read()
-            except OSError as e:
-                logger.warning(f"LLM 报告回读失败，HTML 报告不嵌入解读文本: {e}")
-        else:
-            progress("LLM报告", "LLM分析报告生成失败或未启用")
+        llm_report_md = None
+        if settings.ENABLE_LLM_ANALYSIS_REPORT and video_metadata["analysis_status"] != "failed":
+            progress("LLM报告", "正在生成社会语言学分析报告...")
+            llm_report_path = await reporter.generate_llm_analysis_report(aggregated, metadata=video_metadata)
+            if llm_report_path:
+                reports["sociolinguistic_analysis_report"] = llm_report_path
+                progress("LLM报告", "社会语言学分析报告生成完成")
+                try:
+                    with open(llm_report_path, encoding='utf-8') as f:
+                        llm_report_md = f.read()
+                except OSError as e:
+                    logger.warning(f"LLM 报告回读失败，HTML 报告不嵌入解读文本: {e}")
+            else:
+                progress("LLM报告", "LLM分析报告生成失败或未启用")
 
-    try:
-        reports["html_report"] = reporter.generate_html_report(aggregated, video_metadata, llm_report_md)
-        progress("报告生成", "HTML 可视化报告生成完成")
-    except OSError as e:
-        logger.warning(f"HTML 可视化报告写出失败，跳过该产出: {e}")
-        progress("报告生成", f"警告：HTML 报告写出失败（{e}），已跳过")
-    reports.update(reporter.zh_reports)
+        try:
+            reports["html_report"] = reporter.generate_html_report(aggregated, video_metadata, llm_report_md)
+            progress("报告生成", "HTML 可视化报告生成完成")
+        except OSError as e:
+            logger.warning(f"HTML 可视化报告写出失败，跳过该产出: {e}")
+            progress("报告生成", f"警告：HTML 报告写出失败（{e}），已跳过")
+        reports.update(reporter.zh_reports)
 
-    progress("报告打包", "正在打包报告...")
-    title_part = _sanitize_zip_filename(crawl.meta.title) or bvid
-    zip_filename = f"[{bvid}]{title_part}.zip"
-    zip_path = os.path.join(options.use_output_dir, zip_filename)
-    zip_valid = _package_reports_zip(reports, zip_path, progress)
-
-    return ReportOutput(reports=reports, zip_path=zip_path, zip_valid=zip_valid)
+        progress("报告打包", "正在打包报告...")
+        title_part = _sanitize_zip_filename(crawl.meta.title) or bvid
+        zip_filename = f"[{bvid}]{title_part}.zip"
+        zip_path = os.path.join(options.use_output_dir, zip_filename)
+        zip_valid = _package_reports_zip(
+            reports, zip_path, progress, expected_bvid=bvid, source_dir=report_dir,
+        )
+        return ReportOutput(reports=reports, zip_path=zip_path, zip_valid=zip_valid)
+    except (Exception, asyncio.CancelledError):
+        progress("报告生成", f"报告生成未完成，中间文件保留于: {report_dir}")
+        logger.warning(f"报告生成未完成，中间文件保留于: {report_dir}")
+        raise
 
 
 @dataclass
@@ -707,14 +757,18 @@ def _load_progress() -> Dict[str, Dict]:
 
 
 def _try_resume_item(item: CompareItem, index: Dict[str, Dict], key: str, progress: ProgressCallback, total: int, idx: int) -> bool:
-    """命中进度文件且报告 ZIP 仍存在时直接复用，返回是否命中"""
+    """进度命中后校验完整性、视频身份与分析状态，再复用历史结果。"""
     record = index.get(key)
-    if not record:
+    if not record or record.get("status") not in {"ok", "reused"}:
         return False
     zip_path = _resolve_progress_zip_path(record.get("zip_path", ""))
-    if not zip_path or not os.path.exists(zip_path):
+    parsed_bvid = InputParser().parse(item.raw_input).bvid
+    expected_bvid = item.bvid or parsed_bvid or record.get("bvid", "")
+    if not zip_path or not expected_bvid or record.get("bvid") != expected_bvid:
         return False
-    item.bvid = record.get("bvid", "") or item.bvid
+    if not ReportArchive(zip_path, expected_bvid).validate(require_completed=True):
+        return False
+    item.bvid = expected_bvid
     item.zip_path = zip_path
     item.reused = True
     item.ok = True
@@ -739,16 +793,14 @@ async def _process_compare_item(
     调度器恢复的终态任务在 run() 前已由 _restore_recovered_items 处置，不会进入本函数"""
     raw = task.input
 
-    if resume and _try_resume_item(item, progress_index, raw, progress, total, idx):
-        task.status = "reused"
-        task.bvid, task.zip_path = item.bvid, _relativize_zip_path(item.zip_path)
-        return
-
     bvid = await _stage_resolve_input(raw, progress)
     item.bvid = bvid
     task.bvid = bvid
 
-    if resume and _try_resume_item(item, progress_index, bvid, progress, total, idx):
+    if resume and (
+        _try_resume_item(item, progress_index, raw, progress, total, idx)
+        or _try_resume_item(item, progress_index, bvid, progress, total, idx)
+    ):
         task.status = "reused"
         task.zip_path = _relativize_zip_path(item.zip_path)
         return
@@ -771,6 +823,10 @@ async def _process_compare_item(
         progress_callback=progress,
         no_cache=not reuse,
     )
+    if analysis.analysis_status == "failed":
+        item.zip_path = analysis.zip_path or ""
+        task.zip_path = _relativize_zip_path(item.zip_path) if item.zip_path else ""
+        raise RuntimeError(f"LLM 分析失败，原始弹幕与硬统计档案保留: {item.zip_path or bvid}")
     if not (analysis.zip_valid and analysis.zip_path):
         raise RuntimeError(f"分析未产生有效报告: {bvid}")
     item.zip_path = analysis.zip_path
@@ -783,26 +839,18 @@ async def _process_compare_item(
 
 
 def _find_reusable_zip(store: CorpusStore, bvid: str) -> str:
-    """索引中查找该 bvid 已登记的可用报告 ZIP（非空且含 metadata.json），不可用返回空串"""
+    """索引中仅复用完整、身份匹配且非失败的单视频 ZIP。"""
     for video in store.get_videos():
         if video.get("bvid") != bvid:
             continue
         zip_path = store.resolve_zip_path(video.get("zip_path", ""))
-        if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
-            continue
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zipf:
-                if METADATA_FILENAME not in zipf.namelist():
-                    continue
-        except (OSError, zipfile.BadZipFile):
-            continue
-        return zip_path
+        if zip_path and ReportArchive(zip_path, bvid).validate(require_completed=True):
+            return zip_path
     return ""
 
 
 def _restore_recovered_items(scheduler, items: Dict[str, "CompareItem"], progress: ProgressCallback) -> None:
-    """调度器终态任务不进执行队列，须在 run() 前回填对应 CompareItem（否则恢复跳过的视频缺席聚合）；
-    产物 ZIP 已不存在时重置为 pending 重新执行"""
+    """恢复终态任务前校验归档完整性、身份和分析状态，不可用时重新执行。"""
     from .scheduler import TERMINAL_STATUSES
 
     for task in scheduler.tasks:
@@ -810,14 +858,22 @@ def _restore_recovered_items(scheduler, items: Dict[str, "CompareItem"], progres
             continue
         item = items[task.input]
         zip_path = _resolve_progress_zip_path(task.zip_path)
-        if zip_path and os.path.exists(zip_path):
-            item.bvid, item.zip_path = task.bvid, zip_path
+        expected_bvid = InputParser().parse(task.input).bvid or task.bvid
+        if (
+            zip_path and expected_bvid and expected_bvid == task.bvid
+            and ReportArchive(zip_path, expected_bvid).validate(require_completed=True)
+        ):
+            item.bvid, item.zip_path = expected_bvid, zip_path
             item.reused = task.status == "reused"
             item.ok = True
             progress("复数分析", f"中断恢复跳过（调度器状态已完成）: {task.bvid or task.input}")
         else:
             task.status = "pending"
-            progress("复数分析", f"历史产物缺失，重新执行: {task.input}")
+            task.zip_path = ""
+            item.ok = False
+            item.zip_path = ""
+            item.reused = False
+            progress("复数分析", f"历史产物缺失、损坏、身份不符或分析失败，重新执行: {task.input}")
 
 
 async def compare_videos(

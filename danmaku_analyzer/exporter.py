@@ -180,6 +180,11 @@ class Exporter:
     def _apa_num(value) -> str:
         return f"{float(value):.3f}"
 
+    @staticmethod
+    def _stratum_label(row) -> str:
+        match = re.search(r"冷热区分层：([^；]+)", str(row.get("note", "")))
+        return f"（冷热区：{match.group(1)}）" if match else ""
+
     def stats_to_apa(self, stats_df: pd.DataFrame) -> str:
         """statistical_tests.csv → APA 推断统计文本（KW 总检验 + 逐对 MWU + 冷热区配对 Wilcoxon + note 注记 + 样本不足说明，均标注未校正）"""
         lines = []
@@ -192,7 +197,7 @@ class Exporter:
             kw_effect = row.get("effect_size")
             kw_effect_text = f"，ε² = {self._apa_num(kw_effect)}" if pd.notna(kw_effect) and str(kw_effect).strip() != "" else ""
             lines.append(
-                f"指标 {row['metric']} 的{axis_word}间差异检验：Kruskal-Wallis H = {self._apa_num(row['statistic'])}，"
+                f"指标 {row['metric']}{self._stratum_label(row)} 的{axis_word}间差异检验：Kruskal-Wallis H = {self._apa_num(row['statistic'])}，"
                 f"p {self._apa_p(row['p_value'])}{kw_effect_text}（未校正 p 值）。"
             )
 
@@ -201,7 +206,9 @@ class Exporter:
             & stats_df["note"].astype(str).str.contains("insufficient_sample", na=False)
         ]
         for _, row in status_rows.iterrows():
-            lines.append(f"分区 {row['group1']} 样本量不足（n = {int(row['n1'])}），未纳入推断检验。")
+            metric = str(row.get("metric", "")) if pd.notna(row.get("metric")) else ""
+            detail = f"，指标 {metric}" if metric else ""
+            lines.append(f"组 {row['group1']}{self._stratum_label(row)}{detail} 样本量不足（n = {int(row['n1'])}），未纳入推断检验。")
 
         mwu = stats_df[stats_df["test_type"] == "Mann-Whitney U"]
         if not mwu.empty:
@@ -209,7 +216,7 @@ class Exporter:
             for _, row in mwu.iterrows():
                 effect = f"，Cliff's δ = {self._apa_num(row['effect_size'])}（{row['effect_magnitude']}）" if pd.notna(row.get("effect_size")) else ""
                 lines.append(
-                    f"  {row['group1']} vs {row['group2']}：U = {self._apa_num(row['statistic'])}，"
+                    f"  指标 {row['metric']}{self._stratum_label(row)}，{row['group1']} vs {row['group2']}：U = {self._apa_num(row['statistic'])}，"
                     f"p {self._apa_p(row['p_value'])}{effect}。"
                 )
 

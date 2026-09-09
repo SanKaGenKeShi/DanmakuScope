@@ -352,6 +352,8 @@ class StatisticalValidator:
         df = pd.read_csv(csv_path, encoding='utf-8-sig')
         if "zone_type" not in df.columns or "bvid" not in df.columns:
             return []
+        df = df[df["bvid"].notna() & (df["bvid"].astype(str).str.strip() != "")].copy()
+        df["bvid"] = df["bvid"].astype(str).str.strip()
         zone = df["zone_type"].astype(str)
         # 防御重复观测（同 bvid 同区多行）：保留首条，避免配对错位与样本量虚高
         hot = df[zone == "hot_zone"].set_index("bvid")
@@ -371,7 +373,7 @@ class StatisticalValidator:
                 continue
             a = pd.to_numeric(hot.loc[paired_bvids, metric], errors="coerce")
             b = pd.to_numeric(cold.loc[paired_bvids, metric], errors="coerce")
-            mask = a.notna() & b.notna()
+            mask = np.isfinite(a) & np.isfinite(b)
             a, b = a[mask], b[mask]
             if len(a) < min_pairs:
                 continue
@@ -404,10 +406,7 @@ class StatisticalValidator:
         return rows
 
     def corpus_compare(self, csv_path: str, groupby_col: Optional[str] = None) -> ComparisonResult:
-        """语料库级推断编排：消费视频级观测表（勿用组级汇总表）。
-        分组键自动分流：多分区按 tname 比对；单分区且开启时间分桶时按 time_period 历时比对；
-        单分区另补冷热区视频内配对检验（情境变异轴）；组内视频数 < CORPUS_MIN_VIDEOS_PER_PARTITION
-        标 insufficient_sample 跳过；无任何可执行检验时输出注记行；仅受 ENABLE_CORPUS_STATISTICS 控制"""
+        """按原分区/时段轴比较视频；双区观测分别检验，并保留单分区的视频内配对检验。"""
         settings = get_settings()
         if not settings.ENABLE_CORPUS_STATISTICS:
             logger.info("语料库级推断统计未启用（ENABLE_CORPUS_STATISTICS=False），跳过 corpus_compare")
@@ -433,69 +432,73 @@ class StatisticalValidator:
             raise ValueError(f"观测表缺少分组列 {groupby_col}: {csv_path}")
         df = df[df[groupby_col].notna() & (df[groupby_col].astype(str).str.strip() != "")]
 
-        min_videos = settings.CORPUS_MIN_VIDEOS_PER_PARTITION
-        counts = df.groupby(groupby_col).size()
-        valid = sorted(counts[counts >= min_videos].index.astype(str).tolist())
-
+        if "bvid" not in df.columns:
+            raise ValueError(f"观测表缺少视频身份列 bvid: {csv_path}")
+        df = df[df["bvid"].notna() & (df["bvid"].astype(str).str.strip() != "")].copy()
+        df["bvid"] = df["bvid"].astype(str).str.strip()
+        df[groupby_col] = df[groupby_col].astype(str)
+        zones = df["zone_type"].fillna("").astype(str).str.strip() if "zone_type" in df.columns else pd.Series("", index=df.index)
         rows: List[Dict] = []
-        axis_label = "时段" if groupby_col == "time_period" else "分区"
-        for raw_name, count in sorted(counts.items(), key=lambda kv: str(kv[0])):
-            # 时段列 CSV 往返后可能为数值 dtype，统一转字符串避免键查错位
-            name = str(raw_name)
-            n = int(count)
-            sufficient = n >= min_videos
-            rows.append({
-                "metric": "",
-                "test_type": "sample_status",
-                "group1": name,
-                "group2": "",
-                "n1": n,
-                "n2": "",
-                "statistic": "",
-                "p_value": "",
-                "effect_size": "",
-                "effect_magnitude": "",
-                "note": "sample_sufficient" if sufficient else f"insufficient_sample（视频数 {n} < {min_videos}，不参与检验）",
-            })
+        for zone in sorted(zones.unique()):
+            rows.extend(self._compare_stratum(df.loc[zones == zone], groupby_col, zone))
 
-        if len(valid) >= 2:
-            # 时段轴在 note 追加检验轴标注，供导出端措辞区分（分区间/时段间）
-            axis_note_suffix = "" if groupby_col == "tname" else "；检验轴：时段"
-            sub = df[df[groupby_col].astype(str).isin(valid)]
-            for metric in SCALAR_FIELDS:
-                if metric not in sub.columns:
-                    continue
-                groups: Dict[str, List[float]] = {}
-                for name in valid:
-                    values = pd.to_numeric(sub.loc[sub[groupby_col].astype(str) == name, metric], errors='coerce').dropna().tolist()
-                    if len(values) >= 2:
-                        groups[name] = values
-                if len(groups) < 2:
-                    continue
-                kw_row = self.kruskal_wallis_test(groups, metric)
-                if kw_row:
-                    kw_row["note"] += axis_note_suffix
-                    rows.append(kw_row)
-                mwu_rows = self.pairwise_mann_whitney(groups, metric)
-                for mwu_row in mwu_rows:
-                    mwu_row["note"] += axis_note_suffix
-                rows.extend(mwu_rows)
-            logger.info(f"语料库级推断检验完成: 按{axis_label}分组 {len(valid)} 个有效组，{len(rows)} 行结果（未校正 p 值）")
-        else:
-            logger.warning(f"有效{axis_label}不足（{len(valid)} < 2，门槛：每组视频数 >= {min_videos}），未执行组间检验")
-
-        # 单分区合并模式：补冷热区视频内配对检验（多分区场景避免跨分区混杂不执行）
         if df["tname"].astype(str).str.strip().nunique() <= 1:
             paired_rows = self.zone_paired_compare(csv_path)
             rows.extend(paired_rows)
-            if len(valid) < 2 and not paired_rows:
+            if not any(row["test_type"] in {"Kruskal-Wallis", "Mann-Whitney U", "Wilcoxon 符号秩（配对）"} for row in rows):
                 rows.append({
                     "metric": "", "test_type": "note", "group1": "", "group2": "",
                     "n1": "", "n2": "", "statistic": "", "p_value": "",
                     "effect_size": "", "effect_magnitude": "",
-                    "note": "单一分区且未启用时间分桶/冷热区双区保留，无可用比较轴，未执行推断检验",
+                    "note": "单一分区且无可用比较轴达到有效视频数门槛，未执行推断检验",
                 })
 
         return ComparisonResult(rows=rows)
+
+    def _compare_stratum(self, df: pd.DataFrame, groupby_col: str, zone: str) -> List[Dict]:
+        """同一冷热区内每个 bvid 仅贡献一个观测，每指标独立检查有效视频数。"""
+        duplicates = int(df["bvid"].duplicated().sum())
+        if duplicates:
+            logger.warning(f"冷热区 {zone or '合并'} 重复视频观测 {duplicates} 条，保留首条，不增加样本量")
+        df = df.drop_duplicates("bvid", keep="first")
+        min_videos = get_settings().CORPUS_MIN_VIDEOS_PER_PARTITION
+        suffix = f"；冷热区分层：{zone}；统计单位：唯一视频" if zone else ""
+        axis_suffix = "；检验轴：时段" if groupby_col != "tname" else ""
+        counts = df.groupby(groupby_col)["bvid"].nunique()
+        rows = [self._sample_status(str(name), int(count), min_videos, suffix) for name, count in sorted(counts.items())]
+        for metric in SCALAR_FIELDS:
+            groups = {}
+            if metric not in df.columns:
+                logger.warning(f"指标 {metric} 缺失，冷热区 {zone or '合并'} 不执行该指标检验")
+            for name, count in sorted(counts.items()):
+                series = df.loc[df[groupby_col] == name, metric] if metric in df.columns else pd.Series(dtype=float)
+                values = pd.to_numeric(series, errors="coerce")
+                values = values[np.isfinite(values)].tolist()
+                n = len(values)
+                if n != count:
+                    rows.append(self._sample_status(str(name), n, min_videos, suffix, metric))
+                    if n < min_videos:
+                        logger.warning(f"组 {name}{suffix} 指标 {metric} 有效唯一视频数 {n} < {min_videos}，不参与检验")
+                if n >= min_videos and n > 0:
+                    groups[str(name)] = values
+            if len(groups) < 2:
+                continue
+            test_rows = self.pairwise_mann_whitney(groups, metric)
+            kw_row = self.kruskal_wallis_test(groups, metric)
+            if kw_row:
+                test_rows.insert(0, kw_row)
+            for row in test_rows:
+                row["note"] += axis_suffix + suffix
+            rows.extend(test_rows)
+        return rows
+
+    @staticmethod
+    def _sample_status(name: str, count: int, minimum: int, suffix: str, metric: str = "") -> Dict:
+        note = "sample_sufficient" if count >= minimum else f"insufficient_sample（有效唯一视频数 {count} < {minimum}，不参与检验）"
+        return {
+            "metric": metric, "test_type": "sample_status", "group1": name, "group2": "",
+            "n1": count, "n2": "", "statistic": "", "p_value": "",
+            "effect_size": "", "effect_magnitude": "", "note": note + suffix,
+        }
 
 

@@ -634,6 +634,10 @@ class DanmakuTUI(App):
             )
             if not result.zip_valid:
                 raise RuntimeError(i18n.t("error.no_report", input=input_str))
+            if getattr(result, "analysis_status", "ok") == "failed":
+                raise RuntimeError(f"LLM 标注全部失败；原始数据与硬统计已保存: {result.zip_path}")
+            if getattr(result, "analysis_status", "ok") == "degraded":
+                self._log_lines(["部分标注降级或缺失，请检查报告中的有效标注数与失败状态。"])
             self._log_lines(
                 [
                     f"✔ {i18n.t('log.done')} {i18n.t('log.video')}: {result.title}",

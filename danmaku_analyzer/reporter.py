@@ -7,13 +7,14 @@ import os
 import json
 import csv
 import shutil
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, get_args
 from datetime import datetime
 
 import pandas as pd
 
 from .config import get_settings
 from .llm_config import get_llm_settings
+from .llm_models import EmotionOutput, InteractionTypeOutput, OrthographyOutput, SentenceFunctionOutput
 from .aggregator import AggregatedData
 from .utils.logger import get_logger
 
@@ -48,6 +49,13 @@ _ZH_COLUMN_LABELS = {
     "tname": "分区",
     "zone_type": "冷热区",
     "danmaku_count": "弹幕数",
+    "total_word_count": "总词数",
+    "total_char_count": "总字符数",
+    "label_weight_sum": "有效标注权重和",
+    "valid_label_count": "有效标注数",
+    "llm_record_count": "标注记录总数",
+    "failed_record_count": "标注失败数",
+    "degraded_record_count": "降级标注数",
     "avg_word_length": "平均词长",
     "content_word_density": "实词密度",
     "punctuation_emoji_rate": "标点与表情率",
@@ -241,6 +249,15 @@ class Reporter:
 
     def _write_dataframe(self, rows: List[Dict], filename: str, description: str) -> str:
         df = pd.DataFrame(rows)
+        if not rows:
+            columns = ["tname", "zone_type", "danmaku_count"]
+            if filename == "table_lexical_by_partition.csv":
+                columns += ["total_word_count", "total_char_count", "avg_word_length", "content_word_density", "punctuation_emoji_rate"]
+            df = pd.DataFrame(columns=columns)
+        if filename == "table_lexical_by_partition.csv":
+            category_columns = [col for col in df.columns if col.startswith(("pos_", "syllable_"))]
+            for col in category_columns:
+                df.loc[df["total_word_count"] > 0, col] = df.loc[df["total_word_count"] > 0, col].fillna(0.0)
         filepath = os.path.join(self.output_dir, filename)
         df.to_csv(filepath, index=False, encoding='utf-8-sig')
         logger.info(f"{description}已保存: {filepath}")
@@ -286,6 +303,8 @@ class Reporter:
                 "tname": item.tname,
                 "zone_type": item.zone_type,
                 "danmaku_count": item.danmaku_count,
+                "total_word_count": item.total_word_count,
+                "total_char_count": item.total_char_count,
                 "avg_word_length": item.avg_word_length,
                 "content_word_density": item.content_word_density,
                 "punctuation_emoji_rate": item.punctuation_emoji_rate,
@@ -299,67 +318,46 @@ class Reporter:
         
         return self._write_dataframe(rows, "table_lexical_by_partition.csv", "词类统计表")
     
+    @staticmethod
+    def _label_row(item: AggregatedData, dimension: str, distribution: dict, model, field: str, prefix: str = "") -> dict:
+        """类别零频与整组未标注分开表示，携带实际有效分母。"""
+        weight = item.label_weight_sums.get(dimension)
+        observed = weight > 0 if weight is not None else bool(distribution)
+        return {
+            "tname": item.tname,
+            "zone_type": item.zone_type,
+            "danmaku_count": item.danmaku_count,
+            "label_weight_sum": weight,
+            "valid_label_count": item.valid_label_counts.get(dimension),
+            **{
+                prefix + label: distribution.get(label, 0.0) if observed else None
+                for label in get_args(model.model_fields[field].annotation)
+            },
+        }
+
     def _generate_orthography_table(self, data: List[AggregatedData]) -> str:
         rows = []
         for item in data:
-            row = {
-                "tname": item.tname,
-                "zone_type": item.zone_type,
-                "danmaku_count": item.danmaku_count,
-            }
-            for metric, value in item.orthography_hard_metrics.items():
-                row[f"hard_{metric}"] = value
-            for status, ratio in item.orthography_status_distribution.items():
-                row[f"soft_{status}"] = ratio
-            
+            row = self._label_row(item, "orthography", item.orthography_status_distribution, OrthographyOutput, "status", "soft_")
+            row["total_char_count"] = item.total_char_count
+            row.update({f"hard_{key}": value for key, value in item.orthography_hard_metrics.items()})
             rows.append(row)
-        
         return self._write_dataframe(rows, "table_orthography.csv", "正字法统计表")
-    
+
     def _generate_sentence_function_table(self, data: List[AggregatedData]) -> str:
-        rows = []
-        for item in data:
-            row = {
-                "tname": item.tname,
-                "zone_type": item.zone_type,
-                "danmaku_count": item.danmaku_count,
-            }
-            for sf, ratio in item.sentence_function_distribution.items():
-                row[sf] = ratio
-            
-            rows.append(row)
-        
+        rows = [self._label_row(item, "sentence_function", item.sentence_function_distribution, SentenceFunctionOutput, "label") for item in data]
         return self._write_dataframe(rows, "table_sentence_function.csv", "句类分布表")
-    
+
     def _generate_emotion_table(self, data: List[AggregatedData]) -> str:
         rows = []
         for item in data:
-            row = {
-                "tname": item.tname,
-                "zone_type": item.zone_type,
-                "danmaku_count": item.danmaku_count,
-                "cooperative_principle_violation_rate": item.cooperative_principle_violation_rate,
-            }
-            for emotion, ratio in item.emotion_distribution.items():
-                row[emotion] = ratio
-            
+            row = self._label_row(item, "emotion", item.emotion_distribution, EmotionOutput, "label")
+            row["cooperative_principle_violation_rate"] = item.cooperative_principle_violation_rate
             rows.append(row)
-        
         return self._write_dataframe(rows, "table_emotion.csv", "情感分布表")
-    
+
     def _generate_interaction_type_table(self, data: List[AggregatedData]) -> str:
-        rows = []
-        for item in data:
-            row = {
-                "tname": item.tname,
-                "zone_type": item.zone_type,
-                "danmaku_count": item.danmaku_count,
-            }
-            for it, ratio in item.interaction_type_distribution.items():
-                row[it] = ratio
-            
-            rows.append(row)
-        
+        rows = [self._label_row(item, "interaction_type", item.interaction_type_distribution, InteractionTypeOutput, "label") for item in data]
         return self._write_dataframe(rows, "table_interaction_type.csv", "互动类型分布表")
     
     def _generate_consensus_table(self, data: List[AggregatedData]) -> str:
@@ -374,6 +372,9 @@ class Reporter:
                 "medium_consensus_rate": item.medium_consensus_rate,
                 "low_consensus_rate": item.low_consensus_rate,
                 "avg_weight_multiplier": item.avg_weight_multiplier,
+                "llm_record_count": item.llm_record_count,
+                "failed_record_count": item.failed_record_count,
+                "degraded_record_count": item.degraded_record_count,
                 "high_consensus_ci_lower": ci.get("lower"),
                 "high_consensus_ci_upper": ci.get("upper"),
                 "high_consensus_ci_status": ci.get("status", "ok"),
@@ -409,7 +410,8 @@ class Reporter:
         
         fieldnames = [
             "uid_hash", "time_segment", "raw_text", 
-            "tname", "zone_type", "consensus_level", "weight_multiplier"
+            "tname", "zone_type", "consensus_level", "weight_multiplier",
+            "analysis_status", "requested_paths", "successful_paths", "sentence_function_source",
         ]
         
         llm_fields = [
@@ -436,11 +438,16 @@ class Reporter:
                     "zone_type": record.get("zone_type", ""),
                     "consensus_level": record.get("consensus_level", ""),
                     "weight_multiplier": record.get("weight_multiplier", 1.0),
+                    "analysis_status": record.get("analysis_status", "ok"),
+                    "requested_paths": record.get("requested_paths", ""),
+                    "successful_paths": record.get("successful_paths", ""),
+                    "sentence_function_source": record.get("sentence_function_source", ""),
                 }
                 
                 llm_output = record.get("llm_output", {})
                 for csv_field, dim_key, field_name, default in _KAPPA_LLM_FIELDS:
-                    row[csv_field] = llm_output.get(dim_key, {}).get(field_name, default)
+                    dimension = llm_output.get(dim_key)
+                    row[csv_field] = dimension.get(field_name, default) if dimension is not None else ""
                 
                 writer.writerow(row)
         
@@ -456,7 +463,18 @@ class Reporter:
         metadata = {
             "generated_at": datetime.now().isoformat(),
             "prompt_version": llm_cfg.PROMPT_VERSION,
-            "total_videos": sum(item.video_count for item in data),
+            "total_videos": 1 if data else 0,
+            "statistics_schema_version": "2.0",
+            "llm_record_count": sum(item.llm_record_count for item in data),
+            "failed_record_count": sum(item.failed_record_count for item in data),
+            "degraded_record_count": sum(item.degraded_record_count for item in data),
+            "label_observations": [
+                {"tname": item.tname, "zone_type": item.zone_type,
+                 "valid_label_counts": item.valid_label_counts,
+                 "label_weight_sums": item.label_weight_sums,
+                 "low_consensus_rate": item.low_consensus_rate}
+                for item in data
+            ],
             "total_danmaku": sum(item.danmaku_count for item in data),
             "total_segments": sum(item.segment_count for item in data),
             "partitions": list(set(item.tname for item in data)),

@@ -75,7 +75,9 @@ if (file.exists(stats_path)) {{
   print(stats_df)
   kw <- stats_df[stats_df$test_type == "Kruskal-Wallis" & !is.na(stats_df$p_value), ]
   if (nrow(kw) > 0) {{
-    kw_labels <- setNames(sprintf("%s\\nKW p=%.4g", kw$metric, kw$p_value), kw$metric)
+    kw_zone <- ifelse(grepl("冷热区分层：", kw$note), sub(".*冷热区分层：([^；]+).*", "\\\\1", kw$note), "")
+    kw_key <- paste(kw$metric, kw_zone, sep = " / ")
+    kw_labels <- setNames(sprintf("%s\\nKW p=%.4g", kw_key, kw$p_value), kw_key)
   }}
   wil <- stats_df[stats_df$test_type == "Wilcoxon 符号秩（配对）" & !is.na(stats_df$p_value), ]
   if (nrow(wil) > 0) {{
@@ -86,13 +88,15 @@ if (file.exists(stats_path)) {{
 }}
 
 # ---- 2. 核心指标分区间箱线图（每视频一个点，分面标签叠加 KW p 值） ----
+videos$plot_zone <- if ("zone_type" %in% names(videos)) ifelse(is.na(videos$zone_type), "", videos$zone_type) else ""
+if ("bvid" %in% names(videos)) videos <- videos %>% distinct(bvid, plot_zone, .keep_all = TRUE)
 metric_long <- videos %>%
-  select(tname, all_of(scalar_metrics)) %>%
-  pivot_longer(-tname, names_to = "metric", values_to = "value")
+  select(tname, plot_zone, any_of(scalar_metrics)) %>%
+  pivot_longer(-c(tname, plot_zone), names_to = "metric", values_to = "value")
 
-metric_long$facet_label <- metric_long$metric
+metric_long$facet_label <- paste(metric_long$metric, metric_long$plot_zone, sep = " / ")
 if (!is.null(kw_labels)) {{
-  idx <- match(metric_long$metric, names(kw_labels))
+  idx <- match(metric_long$facet_label, names(kw_labels))
   hit <- !is.na(idx)
   metric_long$facet_label[hit] <- unname(kw_labels[idx[hit]])
 }}
@@ -107,24 +111,35 @@ p_box <- ggplot(metric_long, aes(x = tname, y = value, fill = tname)) +
 ggsave("corpus_boxplots.pdf", p_box, width = 10, height = 8)
 ggsave("corpus_boxplots.png", p_box, width = 10, height = 8, dpi = 300)
 
-# ---- 3. 分布列堆叠条形图（按弹幕数加权均值，前缀分组） ----
-dist_cols <- setdiff(names(videos), c(identity_cols, scalar_metrics))
-if (length(dist_cols) > 0) {{
-  dist_long <- videos %>%
-    select(tname, danmaku_count, all_of(dist_cols)) %>%
-    pivot_longer(-c(tname, danmaku_count), names_to = "category", values_to = "value") %>%
-    mutate(group = ifelse(grepl("_", category), sub("_.*$", "", category), "other")) %>%
-    group_by(group, tname, category) %>%
-    summarise(value = weighted.mean(value, danmaku_count, na.rm = TRUE), .groups = "drop")
-
-  p_dist <- ggplot(dist_long, aes(x = tname, y = value, fill = category)) +
-    geom_col() +
-    facet_wrap(~ group, scales = "free") +
-    theme_bw() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-    labs(x = axis_label, y = "加权占比", fill = "类别")
-  ggsave("corpus_distributions.pdf", p_dist, width = 12, height = 8)
-  ggsave("corpus_distributions.png", p_dist, width = 12, height = 8, dpi = 300)
+# ---- 3. 分布图消费同包汇总表，避免重新以弹幕数代替实际分母 ----
+summary_path <- file.path(dirname(csv_path), "corpus_summary.csv")
+if (file.exists(summary_path)) {{
+  summary <- read.csv(summary_path, fileEncoding = "UTF-8-BOM", stringsAsFactors = FALSE, check.names = FALSE)
+  summary$plot_group <- as.character(summary$tname)
+  for (dimension in intersect(c("time_period", "zone_type"), names(summary))) {{
+    summary$plot_group <- paste(summary$plot_group, summary[[dimension]], sep = " / ")
+  }}
+  dist_cols <- names(summary)[grepl("_mean$", names(summary)) & !sub("_mean$", "", names(summary)) %in% scalar_metrics & !grepl("^hard_", names(summary))]
+  if (length(dist_cols) > 0) {{
+    dist_long <- summary %>%
+      select(plot_group, all_of(dist_cols)) %>%
+      pivot_longer(-plot_group, names_to = "category", values_to = "value") %>%
+      mutate(category = sub("_mean$", "", category), group = sub("_.*$", "", category)) %>%
+      filter(!is.na(value))
+    dist_long$group[dist_long$category %in% c("positive", "neutral", "negative")] <- "emotion"
+    dist_long$group[dist_long$category %in% c("assertion", "question", "exclamation", "directive", "fragment")] <- "sentence_function"
+    dist_long$group[dist_long$category %in% c("check_in", "identity_claim", "mocking", "info_request", "expression", "other")] <- "interaction_type"
+    if (nrow(dist_long) > 0) {{
+      p_dist <- ggplot(dist_long, aes(x = plot_group, y = value, fill = category)) +
+        geom_col() + facet_wrap(~ group, scales = "free") + theme_bw() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        labs(x = axis_label, y = "有效标注或词项加权占比", fill = "类别")
+      ggsave("corpus_distributions.pdf", p_dist, width = 12, height = 8)
+      ggsave("corpus_distributions.png", p_dist, width = 12, height = 8, dpi = 300)
+    }}
+  }}
+}} else {{
+  message("缺少 corpus_summary.csv，跳过分布图，避免按错误分母重新聚合")
 }}
 
 # ---- 4. 冷热区配对比较箱线图（叠加 Wilcoxon 符号秩 p 值；观测表无双区数据时跳过） ----
@@ -209,7 +224,9 @@ if os.path.exists(stats_path):
     print(stats_df)
     kw = stats_df[(stats_df["test_type"] == "Kruskal-Wallis") & stats_df["p_value"].notna()]
     for _, row in kw.iterrows():
-        kw_labels[row["metric"]] = "%.4g" % row["p_value"]
+        note = str(row.get("note", ""))
+        zone = note.split("冷热区分层：", 1)[1].split("；", 1)[0] if "冷热区分层：" in note else ""
+        kw_labels[(row["metric"], zone)] = "%.4g" % row["p_value"]
     wil = stats_df[(stats_df["test_type"] == "Wilcoxon 符号秩（配对）") & stats_df["p_value"].notna()]
     for _, row in wil.iterrows():
         wilcoxon_labels[row["metric"]] = "%.4g" % row["p_value"]
@@ -217,24 +234,27 @@ else:
     print("未找到 " + stats_path + "，箱线图不叠加检验结果")
 
 # ---- 2. 核心指标组间比较箱线图（每视频一个点，子图标题叠加 KW p 值） ----
+videos["_plot_zone"] = videos["zone_type"].fillna("").astype(str) if "zone_type" in videos.columns else ""
+if "bvid" in videos.columns:
+    videos = videos.drop_duplicates(["bvid", "_plot_zone"])
 metric_long = videos.melt(
-    id_vars="tname",
+    id_vars=["tname", "_plot_zone"],
     value_vars=[m for m in scalar_metrics if m in videos.columns],
     var_name="metric", value_name="value",
 )
-metrics_present = sorted(metric_long["metric"].unique())
+metrics_present = sorted(set(zip(metric_long["metric"], metric_long["_plot_zone"])))
 if metrics_present:
     cols_n = min(3, len(metrics_present))
     rows_n = (len(metrics_present) + cols_n - 1) // cols_n
     fig, axes = plt.subplots(rows_n, cols_n, figsize=(5 * cols_n, 4 * rows_n), squeeze=False)
-    for i, metric in enumerate(metrics_present):
+    for i, (metric, zone) in enumerate(metrics_present):
         ax = axes[i // cols_n][i % cols_n]
-        sub = metric_long[metric_long["metric"] == metric]
+        sub = metric_long[(metric_long["metric"] == metric) & (metric_long["_plot_zone"] == zone)]
         sns.boxplot(data=sub, x="tname", y="value", ax=ax)
         sns.stripplot(data=sub, x="tname", y="value", color="0.3", size=3, ax=ax)
-        title = metric
-        if metric in kw_labels:
-            title += "\\nKW p=" + kw_labels[metric]
+        title = metric + (" / " + zone if zone else "")
+        if (metric, zone) in kw_labels:
+            title += "\\nKW p=" + kw_labels[(metric, zone)]
         ax.set_title(title)
         ax.set_xlabel(axis_label)
         ax.tick_params(axis="x", rotation=45)
@@ -244,32 +264,38 @@ if metrics_present:
     fig.savefig("corpus_boxplots.png", dpi=300)
     fig.savefig("corpus_boxplots.pdf")
 
-# ---- 3. 分布列堆叠条形图（按弹幕数加权均值，前缀分组） ----
-identity_cols = ["bvid", "tname", "pubdate", "prompt_version", "zone_type", "danmaku_count", "time_period"]
-dist_cols = [c for c in videos.columns if c not in identity_cols and c not in scalar_metrics]
-if dist_cols:
-    dist_long = videos.melt(
-        id_vars=["tname", "danmaku_count"], value_vars=dist_cols,
-        var_name="category", value_name="value",
-    )
-    dist_long["group"] = dist_long["category"].str.split("_").str[0]
-    dist_long["weighted"] = dist_long["value"] * dist_long["danmaku_count"]
-    agg = dist_long.groupby(["group", "tname", "category"], as_index=False).agg(
-        weighted=("weighted", "sum"), total_danmaku=("danmaku_count", "sum")
-    )
-    agg["value"] = agg["weighted"] / agg["total_danmaku"]
-    groups = sorted(agg["group"].unique())
-    fig2, axes2 = plt.subplots(1, len(groups), figsize=(6 * len(groups), 5), squeeze=False)
-    for gi, group in enumerate(groups):
-        ax = axes2[0][gi]
-        pivot = agg[agg["group"] == group].pivot(index="tname", columns="category", values="value").fillna(0)
-        pivot.plot(kind="bar", stacked=True, ax=ax)
-        ax.set_title(group)
-        ax.set_ylabel("加权占比")
-        ax.tick_params(axis="x", rotation=45)
-    fig2.tight_layout()
-    fig2.savefig("corpus_distributions.png", dpi=300)
-    fig2.savefig("corpus_distributions.pdf")
+# ---- 3. 分布图直接消费同包汇总表，保持各指标实际分母 ----
+summary_path = os.path.join(os.path.dirname(os.path.abspath(csv_path)), "corpus_summary.csv")
+if os.path.exists(summary_path):
+    summary = pd.read_csv(summary_path, encoding="utf-8-sig")
+    summary["plot_group"] = summary["tname"].astype(str)
+    for dimension in ["time_period", "zone_type"]:
+        if dimension in summary.columns:
+            summary["plot_group"] += " / " + summary[dimension].fillna("").astype(str)
+    dist_cols = [c for c in summary.columns if c.endswith("_mean") and c[:-5] not in scalar_metrics and not c.startswith("hard_")]
+    if dist_cols:
+        agg = summary.melt(id_vars="plot_group", value_vars=dist_cols, var_name="category", value_name="value")
+        agg["category"] = agg["category"].str.removesuffix("_mean")
+        agg["group"] = agg["category"].str.split("_").str[0]
+        agg.loc[agg["category"].isin(["positive", "neutral", "negative"]), "group"] = "emotion"
+        agg.loc[agg["category"].isin(["assertion", "question", "exclamation", "directive", "fragment"]), "group"] = "sentence_function"
+        agg.loc[agg["category"].isin(["check_in", "identity_claim", "mocking", "info_request", "expression", "other"]), "group"] = "interaction_type"
+        agg = agg.dropna(subset=["value"])
+        groups = sorted(agg["group"].unique())
+        if groups:
+            fig2, axes2 = plt.subplots(1, len(groups), figsize=(6 * len(groups), 5), squeeze=False)
+            for gi, group in enumerate(groups):
+                ax = axes2[0][gi]
+                pivot = agg[agg["group"] == group].pivot(index="plot_group", columns="category", values="value")
+                pivot.plot(kind="bar", stacked=True, ax=ax)
+                ax.set_title(group)
+                ax.set_ylabel("有效标注或词项加权占比")
+                ax.tick_params(axis="x", rotation=45)
+            fig2.tight_layout()
+            fig2.savefig("corpus_distributions.png", dpi=300)
+            fig2.savefig("corpus_distributions.pdf")
+else:
+    print("缺少 corpus_summary.csv，跳过分布图，避免按错误分母重新聚合")
 
 # ---- 4. 冷热区配对比较箱线图（叠加 Wilcoxon 符号秩 p 值；观测表无双区数据时跳过） ----
 if "zone_type" in videos.columns:

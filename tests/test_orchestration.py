@@ -274,7 +274,7 @@ class TestSupplementaryReportsDegradation:
         from danmaku_analyzer.reporter import Reporter
 
         class _RaisingManifest:
-            def write(self, output_dir):
+            def write(self, output_dir, overrides=None):
                 raise OSError("disk full")
 
         def raising_methodology(self, metadata, sampling=None):
@@ -297,7 +297,7 @@ class TestSupplementaryReportsDegradation:
         from danmaku_analyzer.reporter import Reporter
 
         class _RaisingManifest:
-            def write(self, output_dir):
+            def write(self, output_dir, overrides=None):
                 raise OSError("disk full")
 
         monkeypatch.setattr(pipeline_module, "ReproManifestBuilder", _RaisingManifest)
@@ -320,9 +320,13 @@ class TestRestoredItemsBackfill:
         from danmaku_analyzer.pipeline import CompareItem, _restore_recovered_items
         from danmaku_analyzer.scheduler import TaskScheduler
 
+        from danmaku_analyzer.report_archive import ReportArchive
+
         zip_path = str(tmp_path / "a.zip")
         with zipfile.ZipFile(zip_path, 'w') as z:
-            z.writestr("metadata.json", "{}")
+            for name in ReportArchive.CORE_FILENAMES - {"metadata.json"}:
+                z.writestr(name, "test\n")
+            z.writestr("metadata.json", json.dumps({"bvid": "BV1a", "analysis_sample_count": 0}))
         scheduler = TaskScheduler(state_path=str(tmp_path / "tasks.jsonl"))
         scheduler.tasks = [self._make_task("BV1a", "done", zip_path)]
         items = {"BV1a": CompareItem(raw_input="BV1a")}

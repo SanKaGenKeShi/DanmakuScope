@@ -315,6 +315,13 @@ class HtmlReportGenerator:
                 f'<div class="chart-title">{title}</div><div class="chart">{_svg_bar_chart(pairs, color)}</div>'
                 for title, pairs, color in charts if pairs
             )
+            observations = ", ".join(
+                f"{dimension}: {count}" for dimension, count in item.valid_label_counts.items()
+            )
+            if observations:
+                rendered += f'<p class="note">有效标注数（分布仅以有效标注权重和为分母）：{_esc(observations)}</p>'
+            if not any(pairs for _, pairs, _ in charts):
+                rendered += '<p class="note">无有效语义标注，未知结果不解释为中性或规范书写。</p>'
             sections.append(f"<section><h2>语用层分布 · {_esc(_group_key(item))}</h2>{rendered}</section>")
         return "\n".join(sections)
 
@@ -328,9 +335,10 @@ class HtmlReportGenerator:
                 if status == "ok" else "样本不足"
             )
             rows.append([_group_key(item), item.high_consensus_rate, item.medium_consensus_rate,
-                         item.low_consensus_rate, item.avg_weight_multiplier, ci_text])
+                         item.low_consensus_rate, item.avg_weight_multiplier, ci_text,
+                         item.llm_record_count, item.failed_record_count, item.degraded_record_count])
         return (
             "<section><h2>双路共识统计</h2>"
-            + _table(["分区 · 冷热区", "高共识率", "中共识率", "低共识率", "平均权重系数", "高共识率 95% CI"], rows)
-            + '<p class="note">共识基于双温度路径输出的归一化 JSD；低共识样本按权重 0.2 保留（零丢弃）。</p></section>'
+            + _table(["分区 · 冷热区", "高共识率", "中共识率", "低共识率", "平均权重系数", "高共识率区间", "记录总数", "失败数", "降级数"], rows)
+            + '<p class="note">共识反映有效复杂路径的一致性；双路请求不完整时标记低共识。低共识有效样本按权重 0.2 保留；失败记录保留但未知标签不参与类别分布。</p></section>'
         )

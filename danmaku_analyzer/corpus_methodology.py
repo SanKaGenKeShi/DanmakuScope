@@ -16,9 +16,9 @@ logger = get_logger(__name__)
 CORPUS_METHODOLOGY_FILENAME = "corpus_methodology.md"
 
 _ZONE_POLICY_LABELS = {
-    "hot_only": "仅保留热区（冷区弹幕稀疏、信号质量低，整视频跳过并告警）",
-    "all": "双区分别保留（观测表增加冷热区维度，供视频内配对检验消费）",
-    "weighted": "冷热区按弹幕数加权合并为单行观测",
+    "hot_only": "仅保留热区，无热区的视频跳过并告警",
+    "all": "双区分别保留，组间检验按冷热区分层；同视频冷热区差异采用配对检验",
+    "weighted": "冷热区按各指标的有效分母合并；旧报告缺分母时告警并按兼容口径估计",
 }
 
 
@@ -76,7 +76,8 @@ class CorpusMethodologyGenerator:
             lines.append(f"- 时间分桶：按视频发布时间以「{settings.TEMPORAL_GRANULARITY}」为粒度分桶（观测表 time_period 列），支撑历时比较。")
         else:
             lines.append("- 时间分桶：未启用。")
-        lines.append("- 统计单位：视频级观测（corpus_videos.csv 每行一个视频或一个视频×冷热区组合），避免段级/弹幕级伪重复。")
+        lines.append("- 统计单位：视频级观测（corpus_videos.csv 每行一个视频或一个视频×冷热区组合）；组间检验按冷热区分层，每层同一视频只贡献一个观测。")
+        lines.append("- 缺失指标保留为空，不作为零值；每项检验均按该指标有效唯一视频数重新检查样本门槛。")
 
         lines += ["", "## 3. 推断统计方法", ""]
         test_types = set()

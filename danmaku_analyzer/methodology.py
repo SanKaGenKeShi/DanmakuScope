@@ -53,11 +53,11 @@ class MethodologyGenerator:
         ]
         if settings.SEGMENTATION_MODE == "dynamic":
             lines.append(
-                f"- 时序切分：基于弹幕密度的动态分段（ruptures PELT，penalty 自动选择），"
+                f"- 时序切分：基于弹幕密度的动态分段（ruptures PELT，penalty = 1），"
                 f"段内弹幕数低于 {settings.MIN_SEGMENT_SAMPLES} 时自动与相邻段合并。"
             )
         else:
-            lines.append(f"- 时序切分：固定等分模式，小段（< {settings.MIN_SEGMENT_SAMPLES} 条）自动合并。")
+            lines.append(f"- 时序切分：按每 {settings.MIN_SEGMENT_SAMPLES} 条弹幕固定分组，末段不足时保留，不执行动态小段合并。")
 
         strategy = "按频次排序取唯一弹幕" if sampling.get("freq_based", settings.ENABLE_FREQ_BASED_SAMPLING) else "每段前 N 条"
         top_n = sampling.get("top_n", settings.TOP_N)
@@ -100,10 +100,14 @@ class MethodologyGenerator:
             "",
             "## 6. 统计方法",
             "",
-            f"- 共识率高/低比例的置信区间：Wilson 区间，置信水平 {settings.CONFIDENCE_LEVEL:.0%}；"
+            f"- 高共识率的置信区间：Wilson 区间，置信水平 {settings.CONFIDENCE_LEVEL:.0%}；"
             f"样本量 < {settings.MIN_SEGMENT_SAMPLES} 时跳过区间并标记 insufficient_sample。",
             "- 语料库级跨分区比较（如适用）：Kruskal-Wallis H + 逐对 Mann-Whitney U + Cliff's delta；"
             "p 值均为未校正值（本项目不实施多重比较校正）。",
+            "- 失败样本仍保留，未知标签不作为中性或规范类别；各维度比例以有效标注权重和为分母。",
+            "- 双路请求不完整时标记降级、低共识；请求成功状态与模型间共识分开报告。",
+            "- 硬统计在段间按指标原始分母合并：词级指标按词数，每千字指标按字符数，弹幕级指标按条数。",
+            "- 当前采样为非随机选择，软标签比例描述所选样本，不直接代表整视频总体分布。",
             "",
             "## 7. 工具版本",
             "",

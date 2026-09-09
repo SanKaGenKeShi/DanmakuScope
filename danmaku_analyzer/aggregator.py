@@ -24,7 +24,9 @@ class AggregatedData:
     video_count: int = 0
     segment_count: int = 0
     danmaku_count: int = 0
-    
+    total_word_count: int = 0
+    total_char_count: int = 0
+
     avg_word_length: float = 0.0
     content_word_density: float = 0.0
     punctuation_emoji_rate: float = 0.0
@@ -36,7 +38,11 @@ class AggregatedData:
     sentence_function_distribution: Dict[str, float] = field(default_factory=dict)
     interaction_type_distribution: Dict[str, float] = field(default_factory=dict)
     orthography_status_distribution: Dict[str, float] = field(default_factory=dict)
-    cooperative_principle_violation_rate: float = 0.0
+    cooperative_principle_violation_rate: Optional[float] = None
+    label_weight_sums: Dict[str, float] = field(default_factory=dict)
+    valid_label_counts: Dict[str, int] = field(default_factory=dict)
+    failed_record_count: int = 0
+    degraded_record_count: int = 0
     
     high_consensus_rate: float = 0.0
     medium_consensus_rate: float = 0.0
@@ -53,6 +59,12 @@ class AggregatedData:
             "tags": self.tags,
             "video_count": self.video_count,
             "segment_count": self.segment_count,
+            "total_word_count": self.total_word_count,
+            "total_char_count": self.total_char_count,
+            "label_weight_sums": self.label_weight_sums,
+            "valid_label_counts": self.valid_label_counts,
+            "failed_record_count": self.failed_record_count,
+            "degraded_record_count": self.degraded_record_count,
             "danmaku_count": self.danmaku_count,
             "hard_metrics": {
                 "avg_word_length": round(self.avg_word_length, 4),
@@ -67,7 +79,7 @@ class AggregatedData:
                 "sentence_function_distribution": self.sentence_function_distribution,
                 "interaction_type_distribution": self.interaction_type_distribution,
                 "orthography_status_distribution": self.orthography_status_distribution,
-                "cooperative_principle_violation_rate": round(self.cooperative_principle_violation_rate, 4),
+                "cooperative_principle_violation_rate": round(self.cooperative_principle_violation_rate, 4) if self.cooperative_principle_violation_rate is not None else None,
             },
             "consensus_stats": {
                 "high_consensus_rate": round(self.high_consensus_rate, 4),
@@ -87,6 +99,12 @@ class AggregatedData:
             "danmaku_count": self.danmaku_count,
             "video_count": self.video_count,
             "segment_count": self.segment_count,
+            "total_word_count": self.total_word_count,
+            "total_char_count": self.total_char_count,
+            "label_weight_sums": self.label_weight_sums,
+            "valid_label_counts": self.valid_label_counts,
+            "failed_record_count": self.failed_record_count,
+            "degraded_record_count": self.degraded_record_count,
             "emotion_distribution": self.emotion_distribution,
             "sentence_function_distribution": self.sentence_function_distribution,
             "interaction_type_distribution": self.interaction_type_distribution,
@@ -96,6 +114,7 @@ class AggregatedData:
             "medium_consensus_rate": self.medium_consensus_rate,
             "low_consensus_rate": self.low_consensus_rate,
             "avg_weight_multiplier": self.avg_weight_multiplier,
+            "llm_record_count": self.llm_record_count,
             "avg_word_length": self.avg_word_length,
             "content_word_density": self.content_word_density,
             "punctuation_emoji_rate": self.punctuation_emoji_rate,
@@ -181,53 +200,34 @@ class Aggregator:
         if not unique_metrics:
             return
         
-        total_weight = sum(hm.total_danmaku_count for hm in unique_metrics)
-        
-        if total_weight > 0:
-            aggregated.avg_word_length = sum(
-                hm.avg_word_length * hm.total_danmaku_count 
-                for hm in unique_metrics
-            ) / total_weight
-            
+        total_danmaku = sum(hm.total_danmaku_count for hm in unique_metrics)
+        total_words = sum(hm.total_word_count for hm in unique_metrics)
+        total_chars = sum(hm.total_char_count for hm in unique_metrics)
+        aggregated.total_word_count = total_words
+        aggregated.total_char_count = total_chars
+
+        if total_words:
+            aggregated.avg_word_length = total_chars / total_words
             aggregated.content_word_density = sum(
-                hm.content_word_density * hm.total_danmaku_count 
-                for hm in unique_metrics
-            ) / total_weight
-            
+                hm.content_word_density * hm.total_word_count for hm in unique_metrics
+            ) / total_words
+        if total_danmaku:
             aggregated.punctuation_emoji_rate = sum(
-                hm.punctuation_emoji_rate * hm.total_danmaku_count 
-                for hm in unique_metrics
-            ) / total_weight
-        
-        pos_counter = defaultdict(float)
-        for hm in unique_metrics:
-            for pos, ratio in hm.pos_distribution.items():
-                pos_counter[pos] += ratio * hm.total_danmaku_count
-        if total_weight > 0:
-            aggregated.pos_distribution = {
-                pos: count / total_weight 
-                for pos, count in pos_counter.items()
-            }
-        
-        syllable_counter = defaultdict(float)
-        for hm in unique_metrics:
-            for syllable_type, ratio in hm.syllable_distribution.items():
-                syllable_counter[syllable_type] += ratio * hm.total_danmaku_count
-        if total_weight > 0:
-            aggregated.syllable_distribution = {
-                syllable_type: count / total_weight 
-                for syllable_type, count in syllable_counter.items()
-            }
-        
-        ortho_counter = defaultdict(float)
-        for hm in unique_metrics:
-            for metric, value in hm.orthography_hard_metrics.items():
-                ortho_counter[metric] += value * hm.total_danmaku_count
-        if total_weight > 0:
-            aggregated.orthography_hard_metrics = {
-                metric: count / total_weight 
-                for metric, count in ortho_counter.items()
-            }
+                hm.punctuation_emoji_rate * hm.total_danmaku_count for hm in unique_metrics
+            ) / total_danmaku
+
+        for attribute, denominator, total in (
+            ("pos_distribution", "total_word_count", total_words),
+            ("syllable_distribution", "total_word_count", total_words),
+            ("orthography_hard_metrics", "total_char_count", total_chars),
+        ):
+            counts = defaultdict(float)
+            for metrics in unique_metrics:
+                for label, ratio in getattr(metrics, attribute).items():
+                    counts[label] += ratio * getattr(metrics, denominator)
+            setattr(aggregated, attribute, {
+                label: count / total if total else 0.0 for label, count in counts.items()
+            })
     
     def _aggregate_soft_labels(
         self, 
@@ -237,43 +237,35 @@ class Aggregator:
         if not records:
             return
         
-        emotion_counter = defaultdict(float)
-        sentence_function_counter = defaultdict(float)
-        interaction_type_counter = defaultdict(float)
-        orthography_status_counter = defaultdict(float)
-        cp_violation_weight = 0.0
-        
-        total_weight = sum(r.llm_result.weight_multiplier for r in records)
-        
-        for record in records:
-            llm_output = record.llm_result.output
-            weight = record.llm_result.weight_multiplier
-            
-            emotion_counter[llm_output.emotion.label] += weight
-            sentence_function_counter[llm_output.sentence_function.label] += weight
-            interaction_type_counter[llm_output.interaction_type.label] += weight
-            orthography_status_counter[llm_output.orthography.status] += weight
-            if llm_output.cooperative_principle.violated:
-                cp_violation_weight += weight
-        
-        if total_weight > 0:
-            aggregated.emotion_distribution = {
-                label: count / total_weight 
-                for label, count in emotion_counter.items()
-            }
-            aggregated.sentence_function_distribution = {
-                label: count / total_weight 
-                for label, count in sentence_function_counter.items()
-            }
-            aggregated.interaction_type_distribution = {
-                label: count / total_weight 
-                for label, count in interaction_type_counter.items()
-            }
-            aggregated.orthography_status_distribution = {
-                label: count / total_weight 
-                for label, count in orthography_status_counter.items()
-            }
-            aggregated.cooperative_principle_violation_rate = cp_violation_weight / total_weight
+        dimensions = (
+            ("emotion", "label", "emotion_distribution"),
+            ("sentence_function", "label", "sentence_function_distribution"),
+            ("interaction_type", "label", "interaction_type_distribution"),
+            ("orthography", "status", "orthography_status_distribution"),
+            ("cooperative_principle", "violated", None),
+        )
+        for dimension, label_field, attribute in dimensions:
+            counts = defaultdict(float)
+            weight_sum = 0.0
+            valid_count = 0
+            for record in records:
+                value = getattr(record.llm_result.output, dimension)
+                if value is None:
+                    continue
+                weight = record.llm_result.weight_multiplier
+                counts[getattr(value, label_field)] += weight
+                weight_sum += weight
+                valid_count += 1
+            aggregated.label_weight_sums[dimension] = weight_sum
+            aggregated.valid_label_counts[dimension] = valid_count
+            if attribute is None:
+                aggregated.cooperative_principle_violation_rate = (
+                    counts[True] / weight_sum if weight_sum else None
+                )
+            else:
+                setattr(aggregated, attribute, {
+                    label: count / weight_sum for label, count in counts.items()
+                } if weight_sum else {})
     
     def _aggregate_consensus_stats(
         self, 
@@ -299,6 +291,8 @@ class Aggregator:
         
         if total > 0:
             aggregated.llm_record_count = total
+            aggregated.failed_record_count = sum(r.llm_result.analysis_status == "failed" for r in records)
+            aggregated.degraded_record_count = sum(r.llm_result.analysis_status == "degraded" for r in records)
             aggregated.high_consensus_rate = high_count / total
             aggregated.medium_consensus_rate = medium_count / total
             aggregated.low_consensus_rate = low_count / total

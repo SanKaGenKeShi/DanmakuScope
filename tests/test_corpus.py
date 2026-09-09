@@ -12,6 +12,8 @@ import pandas as pd
 import pytest
 from unittest.mock import patch
 
+import danmaku_analyzer.config as config_module
+import danmaku_analyzer.llm_config as llm_config_module
 import danmaku_analyzer.corpus_builder as corpus_builder_module
 import danmaku_analyzer.corpus_store as corpus_store_module
 from danmaku_analyzer.corpus_methodology import CORPUS_METHODOLOGY_FILENAME, CorpusMethodologyGenerator
@@ -19,6 +21,14 @@ from danmaku_analyzer.corpus_store import CorpusStore
 from danmaku_analyzer.corpus_builder import SCALAR_FIELDS, CorpusBuilder, CorpusManifest
 from danmaku_analyzer.config import get_settings
 from danmaku_analyzer.statistical_validator import StatisticalValidator
+
+
+@pytest.fixture(autouse=True)
+def isolated_settings(monkeypatch, tmp_path):
+    monkeypatch.setattr(config_module, "_settings", config_module.Settings.model_construct(DATA_ROOT=str(tmp_path)))
+    monkeypatch.setattr(llm_config_module, "llm_settings", llm_config_module.LLMSettings.model_construct(
+        ANALYSIS_REPORT_LLM_BASE_URL="http://127.0.0.1:1/v1", ANALYSIS_REPORT_LLM_MODEL="mock-model",
+    ))
 
 
 # ========== 辅助工厂函数 ==========
@@ -641,7 +651,7 @@ class TestCorpusCliOutputs:
             "total_videos": 1, "total_danmaku": 100, "total_segments": 1,
             "partitions": [tname], "bvid": bvid, "title": f"测试-{bvid}",
             "tname": tname, "tags": [], "pubdate": "2025-03-15T10:00:00",
-            "view_count": 1000, "danmaku_count": 100, "pipeline_version": "0.3.8-beta",
+            "view_count": 1000, "danmaku_count": 100, "pipeline_version": "0.3.9-beta",
         }
 
         def table(rows):

@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from scipy import stats
 
+import danmaku_analyzer.config as config_module
 from danmaku_analyzer.config import get_settings
 from danmaku_analyzer.corpus_builder import SCALAR_FIELDS
 from danmaku_analyzer.statistical_validator import (
@@ -14,6 +15,11 @@ from danmaku_analyzer.statistical_validator import (
     StatisticalValidator,
     cohen_kappa,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_settings(monkeypatch, tmp_path):
+    monkeypatch.setattr(config_module, "_settings", config_module.Settings.model_construct(DATA_ROOT=str(tmp_path)))
 
 
 @pytest.fixture
@@ -295,6 +301,73 @@ class TestPluralModes:
         csv_path = write_videos_csv(tmp_path, rows)
         paired = validator.zone_paired_compare(csv_path)
         assert paired and all(r["n1"] == 3 for r in paired)
+
+
+class TestIndependentVideoIntegrity:
+
+    @pytest.mark.parametrize("zones", [("",), ("hot_zone", "cold_zone")])
+    def test_duplicates_never_increase_between_group_n(self, validator, tmp_path, zones):
+        rows = []
+        for tname in ("游戏", "音乐"):
+            for index in range(3):
+                for zone in zones:
+                    rows.append({**make_video(f"BV{tname}{index}", tname, 0.2 + index * 0.1), "zone_type": zone})
+        df = validator.corpus_compare(write_videos_csv(tmp_path, rows + rows)).to_dataframe()
+        pairs = df[df["test_type"] == "Mann-Whitney U"]
+        assert len(pairs) == len(SCALAR_FIELDS) * len(zones)
+        assert set(pairs["n1"]) == {3}
+        assert set(pairs["n2"]) == {3}
+        assert set(df[df["test_type"] == "Kruskal-Wallis"]["n1"]) == {6}
+        assert set(pairs["group1"]) | set(pairs["group2"]) == {"游戏", "音乐"}
+
+    @pytest.mark.parametrize("missing_value", [float("nan"), float("inf"), "invalid"])
+    def test_each_metric_rechecks_valid_n_in_each_zone(self, validator, tmp_path, missing_value):
+        rows = []
+        for tname in ("游戏", "音乐"):
+            for index in range(3):
+                for zone in ("hot_zone", "cold_zone"):
+                    item = {**make_video(f"BV{tname}{index}", tname, 0.2 + index * 0.1), "zone_type": zone}
+                    if tname == "游戏" and index == 0 and zone == "hot_zone":
+                        item["content_word_density"] = missing_value
+                    rows.append(item)
+        df = validator.corpus_compare(write_videos_csv(tmp_path, rows)).to_dataframe()
+        density = df[(df["metric"] == "content_word_density") & (df["test_type"] == "Mann-Whitney U")]
+        assert len(density) == 1
+        assert "cold_zone" in density.iloc[0]["note"]
+        assert density.iloc[0]["n1"] == density.iloc[0]["n2"] == 3
+        missing_status = df[(df["metric"] == "content_word_density") & (df["test_type"] == "sample_status")]
+        assert missing_status.iloc[0]["n1"] == 2
+        assert "insufficient_sample" in missing_status.iloc[0]["note"]
+        assert "hot_zone" in missing_status.iloc[0]["note"]
+        other = df[(df["metric"] == "high_consensus_rate") & (df["test_type"] == "Mann-Whitney U")]
+        assert len(other) == 2
+
+    def test_unstratified_metric_honors_configured_minimum_after_missing_values(self, validator, tmp_path, monkeypatch):
+        monkeypatch.setattr(get_settings(), "CORPUS_MIN_VIDEOS_PER_PARTITION", 5)
+        rows = [make_video(f"BV{tname}{index}", tname, 0.2 + index * 0.1)
+                for tname in ("游戏", "音乐") for index in range(5)]
+        rows[0]["content_word_density"] = float("nan")
+        df = validator.corpus_compare(write_videos_csv(tmp_path, rows)).to_dataframe()
+        tests = df[df["test_type"].isin(["Kruskal-Wallis", "Mann-Whitney U"])]
+        assert "content_word_density" not in set(tests["metric"])
+        assert "avg_word_length" in set(tests["metric"])
+        status = df[(df["metric"] == "content_word_density") & (df["test_type"] == "sample_status")].iloc[0]
+        assert status["n1"] == 4
+
+    def test_pairing_rechecks_each_metric_and_ignores_nonfinite_values(self, validator, tmp_path):
+        rows = []
+        for index in range(3):
+            for zone in ("hot_zone", "cold_zone"):
+                rows.append({**make_video(f"BV{index}", "游戏", 0.3), "zone_type": zone})
+        rows[0]["content_word_density"] = float("inf")
+        results = validator.zone_paired_compare(write_videos_csv(tmp_path, rows))
+        assert "content_word_density" not in {result["metric"] for result in results}
+        assert all(result["n1"] == result["n2"] == 3 for result in results)
+
+    def test_missing_video_identity_is_not_treated_as_independent_rows(self, validator, tmp_path):
+        rows = [make_video("", tname, 0.5) for tname in ("游戏", "音乐") for _ in range(4)]
+        result = validator.corpus_compare(write_videos_csv(tmp_path, rows))
+        assert not any(row["test_type"] in {"Kruskal-Wallis", "Mann-Whitney U"} for row in result.rows)
 
 
 class TestCohenKappa:
