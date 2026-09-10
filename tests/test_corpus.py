@@ -18,7 +18,8 @@ import danmaku_analyzer.corpus_builder as corpus_builder_module
 import danmaku_analyzer.corpus_store as corpus_store_module
 from danmaku_analyzer.corpus_methodology import CORPUS_METHODOLOGY_FILENAME, CorpusMethodologyGenerator
 from danmaku_analyzer.corpus_store import CorpusStore
-from danmaku_analyzer.corpus_builder import SCALAR_FIELDS, CorpusBuilder, CorpusManifest
+from danmaku_analyzer.corpus_builder import CorpusBuilder, CorpusManifest
+from danmaku_analyzer.report_schema import SCALAR_FIELDS
 from danmaku_analyzer.config import get_settings
 from danmaku_analyzer.statistical_validator import StatisticalValidator
 

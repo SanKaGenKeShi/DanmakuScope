@@ -78,6 +78,30 @@ jobs:
             gh release create "$TAG" --title "$TAG" --notes "$BODY" --latest $PRERELEASE_FLAG
           fi
 
+  verify-package:
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Build wheel and smoke-test installed package
+        run: |
+          uv python install 3.11
+          uv build --wheel
+          WHEEL="$(ls dist/*.whl)"
+          VENV="$RUNNER_TEMP/verify_venv"
+          uv venv "$VENV" --python 3.11
+          uv pip install --python "$VENV/bin/python" "$WHEEL"
+          RUN_DIR="$RUNNER_TEMP/verify_run"
+          mkdir -p "$RUN_DIR"
+          cp tests/installed_package_smoke.py "$RUN_DIR/"
+          cd "$RUN_DIR"
+          "$VENV/bin/python" -I installed_package_smoke.py
+
   build-windows:
     needs: [prepare]
     if: ${{ github.event_name == 'push' || github.event.inputs.build_target == 'windows' || github.event.inputs.build_target == 'all' }}

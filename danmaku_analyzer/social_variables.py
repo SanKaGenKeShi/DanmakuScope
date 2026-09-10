@@ -7,7 +7,7 @@ from typing import List
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(frozen=True)
 class SocialVariables:
     tname: str   # 官方一级分区，唯一硬分组变量
     tags: List[str]  # 用户标签，仅做 LLM 上下文

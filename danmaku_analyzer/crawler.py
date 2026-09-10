@@ -7,7 +7,7 @@ import hashlib
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Optional, Literal
-from pydantic import BaseModel, Field, ConfigDict, field_serializer
+from pydantic import BaseModel, Field, ConfigDict, field_serializer, field_validator
 
 from bilibili_api import video, Credential, HEADERS
 import httpx
@@ -15,15 +15,16 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .partitions import TID_TO_TNAME
 from .utils.logger import get_logger
+from .utils.normalize import normalize_text
 
 logger = get_logger(__name__)
 
 
 class VideoMeta(BaseModel):
     """视频元数据模型"""
-    model_config = ConfigDict(strict=False)
+    model_config = ConfigDict(strict=False, frozen=True)
     
-    bvid: str = Field(description="BV号")
+    bvid: str = Field(min_length=1, description="BV号")
     title: str = Field(description="视频标题")
     tname: str = Field(description="官方一级分区 - 唯一硬分组变量")
     tags: List[str] = Field(default_factory=list, description="用户自定义标签列表 - 仅用作 LLM 提示上下文，不聚类")
@@ -39,13 +40,20 @@ class VideoMeta(BaseModel):
 
 class DanmakuItem(BaseModel):
     """弹幕数据模型"""
-    model_config = ConfigDict(strict=False)
+    model_config = ConfigDict(strict=False, frozen=True)
     
     uid_hash: str = Field(description="用户UID哈希，若为 0 则标记为 unknown_device")
     content: str = Field(description="弹幕内容")
     time_sec: float = Field(description="弹幕出现时间（秒）")
     identity_type: Literal["real_user", "unknown_device"] = Field(description="身份类型")
     
+    @field_validator('time_sec')
+    @classmethod
+    def guard_time_sec(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"time_sec 不能为负: {v}")
+        return v
+
     @field_serializer('time_sec')
     def serialize_time_sec(self, v: float) -> float:
         return round(v, 3)
@@ -143,7 +151,7 @@ class BilibiliCrawler:
                 uid_hash = "unknown_device"
                 identity_type = "unknown_device"
             
-            content = (getattr(dm, 'text', '') or '').strip()
+            content = normalize_text(getattr(dm, 'text', '') or '')
             if not content:
                 continue
             
@@ -198,7 +206,7 @@ class BilibiliCrawler:
                     uid_hash = hashlib.md5(uid_str.encode()).hexdigest()[:16]
                     identity_type = "real_user"
                 
-                content = (d_elem.text or "").strip()
+                content = normalize_text(d_elem.text or "")
                 if not content:
                     skipped_count += 1
                     continue

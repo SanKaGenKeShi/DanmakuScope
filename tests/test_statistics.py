@@ -9,12 +9,8 @@ from scipy import stats
 
 import danmaku_analyzer.config as config_module
 from danmaku_analyzer.config import get_settings
-from danmaku_analyzer.corpus_builder import SCALAR_FIELDS
-from danmaku_analyzer.statistical_validator import (
-    STATISTICAL_TESTS_COLUMNS,
-    StatisticalValidator,
-    cohen_kappa,
-)
+from danmaku_analyzer.report_schema import SCALAR_FIELDS, STATISTICAL_TESTS_COLUMNS
+from danmaku_analyzer.statistical_validator import StatisticalValidator, cohen_kappa
 
 
 @pytest.fixture(autouse=True)

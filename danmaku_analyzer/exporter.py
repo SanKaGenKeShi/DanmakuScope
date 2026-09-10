@@ -11,21 +11,10 @@ from typing import Optional
 
 import pandas as pd
 
+from .report_schema import CORPUS_SUMMARY_FILENAME, SINGLE_VIDEO_TABLES, STATS_TESTS_FILENAME
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-# 单视频报告表 → 展示名；语料库快照内的 corpus_summary.csv 优先于单视频表
-SINGLE_VIDEO_TABLES = {
-    "table_lexical_by_partition.csv": "词类统计",
-    "table_orthography.csv": "正字法统计",
-    "table_sentence_function.csv": "句类分布",
-    "table_emotion.csv": "情感分布",
-    "table_interaction_type.csv": "互动类型分布",
-    "table_consensus_stats.csv": "共识统计",
-}
-CORPUS_SUMMARY_FILENAME = "corpus_summary.csv"
-STATS_TESTS_FILENAME = "statistical_tests.csv"
 
 _LATEX_SPECIAL = re.compile(r'([&%$#_{}~^\\])')
 _EXPORT_DIMENSIONS = {

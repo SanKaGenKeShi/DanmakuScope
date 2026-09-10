@@ -6,6 +6,7 @@ import tempfile
 import zipfile
 from typing import Iterable, Optional
 
+from .report_schema import CORE_FILENAMES, KAPPA_READY_FILENAME, METADATA_FILENAME
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -13,18 +14,6 @@ logger = get_logger(__name__)
 
 class ReportArchive:
     """校验全部 ZIP 成员与单视频身份，仅在验证成功后替换正式归档。"""
-
-    CORE_FILENAMES = frozenset({
-        "metadata.json",
-        "table_lexical_by_partition.csv",
-        "table_orthography.csv",
-        "table_sentence_function.csv",
-        "table_emotion.csv",
-        "table_interaction_type.csv",
-        "table_consensus_stats.csv",
-        "heatmap_data.json",
-        "danmaku_raw.csv",
-    })
 
     def __init__(self, zip_path: str, expected_bvid: Optional[str] = None):
         self.zip_path = os.path.abspath(zip_path)
@@ -55,13 +44,13 @@ class ReportArchive:
             if not self.expected_bvid:
                 raise ValueError("单视频校验缺少期望 BV 号")
             files = {member.filename for member in members if not member.is_dir()}
-            missing = self.CORE_FILENAMES - files
+            missing = CORE_FILENAMES - files
             if missing:
                 raise ValueError(f"ZIP 缺少核心文件: {', '.join(sorted(missing))}")
-            metadata = json.loads(archive.read("metadata.json").decode("utf-8-sig"))
+            metadata = json.loads(archive.read(METADATA_FILENAME).decode("utf-8-sig"))
             if not isinstance(metadata, dict) or metadata.get("bvid") != self.expected_bvid:
                 raise ValueError(f"ZIP 视频身份不符，期望 {self.expected_bvid}")
-            if metadata.get("analysis_sample_count", 1) != 0 and "kappa_ready.csv" not in files:
+            if metadata.get("analysis_sample_count", 1) != 0 and KAPPA_READY_FILENAME not in files:
                 raise ValueError("ZIP 缺少核心文件: kappa_ready.csv")
             status = metadata.get("analysis_status", "ok")
             if status not in {"ok", "degraded", "failed"}:

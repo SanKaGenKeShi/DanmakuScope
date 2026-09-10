@@ -16,6 +16,18 @@ from .config import get_settings
 from .llm_config import get_llm_settings
 from .llm_models import EmotionOutput, InteractionTypeOutput, OrthographyOutput, SentenceFunctionOutput
 from .aggregator import AggregatedData
+from .report_schema import (
+    HEATMAP_FILENAME,
+    KAPPA_READY_FILENAME,
+    METADATA_FILENAME,
+    RAW_DANMAKU_FILENAME,
+    TABLE_CONSENSUS_STATS,
+    TABLE_EMOTION,
+    TABLE_INTERACTION_TYPE,
+    TABLE_LEXICAL,
+    TABLE_ORTHOGRAPHY,
+    TABLE_SENTENCE_FUNCTION,
+)
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -36,13 +48,13 @@ _KAPPA_LLM_FIELDS = [
 
 # 中文版产出映射：英文契约文件名 → 中文文件名（未登记的表不写中文版）
 _ZH_TABLE_FILENAMES = {
-    "table_lexical_by_partition.csv": "词类统计表.csv",
-    "table_orthography.csv": "正字法统计表.csv",
-    "table_sentence_function.csv": "句类分布表.csv",
-    "table_emotion.csv": "情感分布表.csv",
-    "table_interaction_type.csv": "互动类型分布表.csv",
-    "table_consensus_stats.csv": "共识统计表.csv",
-    "danmaku_raw.csv": "原始弹幕.csv",
+    TABLE_LEXICAL: "词类统计表.csv",
+    TABLE_ORTHOGRAPHY: "正字法统计表.csv",
+    TABLE_SENTENCE_FUNCTION: "句类分布表.csv",
+    TABLE_EMOTION: "情感分布表.csv",
+    TABLE_INTERACTION_TYPE: "互动类型分布表.csv",
+    TABLE_CONSENSUS_STATS: "共识统计表.csv",
+    RAW_DANMAKU_FILENAME: "原始弹幕.csv",
 }
 
 _ZH_COLUMN_LABELS = {
@@ -251,10 +263,10 @@ class Reporter:
         df = pd.DataFrame(rows)
         if not rows:
             columns = ["tname", "zone_type", "danmaku_count"]
-            if filename == "table_lexical_by_partition.csv":
+            if filename == TABLE_LEXICAL:
                 columns += ["total_word_count", "total_char_count", "avg_word_length", "content_word_density", "punctuation_emoji_rate"]
             df = pd.DataFrame(columns=columns)
-        if filename == "table_lexical_by_partition.csv":
+        if filename == TABLE_LEXICAL:
             category_columns = [col for col in df.columns if col.startswith(("pos_", "syllable_"))]
             for col in category_columns:
                 df.loc[df["total_word_count"] > 0, col] = df.loc[df["total_word_count"] > 0, col].fillna(0.0)
@@ -290,10 +302,10 @@ class Reporter:
             for item in danmaku_list
         ]
         df = pd.DataFrame(rows, columns=["uid_hash", "content", "time_sec", "identity_type"])
-        filepath = os.path.join(self.output_dir, "danmaku_raw.csv")
+        filepath = os.path.join(self.output_dir, RAW_DANMAKU_FILENAME)
         df.to_csv(filepath, index=False, encoding='utf-8-sig')
         logger.info(f"原始弹幕表已保存: {filepath}（{len(df)} 条）")
-        self._write_zh_twin(df, "danmaku_raw.csv", "原始弹幕表")
+        self._write_zh_twin(df, RAW_DANMAKU_FILENAME, "原始弹幕表")
         return filepath
     
     def _generate_lexical_table(self, data: List[AggregatedData]) -> str:
@@ -316,7 +328,7 @@ class Reporter:
             
             rows.append(row)
         
-        return self._write_dataframe(rows, "table_lexical_by_partition.csv", "词类统计表")
+        return self._write_dataframe(rows, TABLE_LEXICAL, "词类统计表")
     
     @staticmethod
     def _label_row(item: AggregatedData, dimension: str, distribution: dict, model, field: str, prefix: str = "") -> dict:
@@ -342,11 +354,11 @@ class Reporter:
             row["total_char_count"] = item.total_char_count
             row.update({f"hard_{key}": value for key, value in item.orthography_hard_metrics.items()})
             rows.append(row)
-        return self._write_dataframe(rows, "table_orthography.csv", "正字法统计表")
+        return self._write_dataframe(rows, TABLE_ORTHOGRAPHY, "正字法统计表")
 
     def _generate_sentence_function_table(self, data: List[AggregatedData]) -> str:
         rows = [self._label_row(item, "sentence_function", item.sentence_function_distribution, SentenceFunctionOutput, "label") for item in data]
-        return self._write_dataframe(rows, "table_sentence_function.csv", "句类分布表")
+        return self._write_dataframe(rows, TABLE_SENTENCE_FUNCTION, "句类分布表")
 
     def _generate_emotion_table(self, data: List[AggregatedData]) -> str:
         rows = []
@@ -354,11 +366,11 @@ class Reporter:
             row = self._label_row(item, "emotion", item.emotion_distribution, EmotionOutput, "label")
             row["cooperative_principle_violation_rate"] = item.cooperative_principle_violation_rate
             rows.append(row)
-        return self._write_dataframe(rows, "table_emotion.csv", "情感分布表")
+        return self._write_dataframe(rows, TABLE_EMOTION, "情感分布表")
 
     def _generate_interaction_type_table(self, data: List[AggregatedData]) -> str:
         rows = [self._label_row(item, "interaction_type", item.interaction_type_distribution, InteractionTypeOutput, "label") for item in data]
-        return self._write_dataframe(rows, "table_interaction_type.csv", "互动类型分布表")
+        return self._write_dataframe(rows, TABLE_INTERACTION_TYPE, "互动类型分布表")
     
     def _generate_consensus_table(self, data: List[AggregatedData]) -> str:
         rows = []
@@ -381,7 +393,7 @@ class Reporter:
             }
             rows.append(row)
         
-        return self._write_dataframe(rows, "table_consensus_stats.csv", "共识统计表")
+        return self._write_dataframe(rows, TABLE_CONSENSUS_STATS, "共识统计表")
     
     def _generate_heatmap_data(self, data: List[AggregatedData]) -> str:
         heatmap_data = {
@@ -397,7 +409,7 @@ class Reporter:
             heatmap_data["sentence_function_heatmap"][key] = item.sentence_function_distribution
             heatmap_data["orthography_heatmap"][key] = item.orthography_status_distribution
         
-        filepath = os.path.join(self.output_dir, "heatmap_data.json")
+        filepath = os.path.join(self.output_dir, HEATMAP_FILENAME)
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(heatmap_data, f, ensure_ascii=False, indent=2)
         
@@ -423,7 +435,7 @@ class Reporter:
         ]
         fieldnames.extend(llm_fields)
         
-        filepath = os.path.join(self.output_dir, "kappa_ready.csv")
+        filepath = os.path.join(self.output_dir, KAPPA_READY_FILENAME)
         
         with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -496,7 +508,7 @@ class Reporter:
         if extra_metadata:
             metadata.update(extra_metadata)
         
-        filepath = os.path.join(self.output_dir, "metadata.json")
+        filepath = os.path.join(self.output_dir, METADATA_FILENAME)
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
         

@@ -13,9 +13,9 @@ from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# 缓存 schema 版本：Pydantic 模型字段变动（增/删/改名）时必须 +1，
+# 缓存 schema 版本：Pydantic 模型字段变动（增/删/改名）或缓存载荷口径变化（如文本归一化）时必须 +1，
 # 旧版本缓存会在读取时被丢弃并重新拉取，避免 pickle 反序列化静默出错
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 
 
 class CacheManager:

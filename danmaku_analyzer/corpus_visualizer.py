@@ -14,15 +14,13 @@ from typing import List, Optional
 import pandas as pd
 
 from .config import get_settings
-from .corpus_builder import SCALAR_FIELDS
+from .report_schema import SCALAR_FIELDS, STATS_TESTS_FILENAME, VIDEOS_CSV_FILENAME
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 R_SCRIPT_FILENAME = "corpus_plots.R"
 PYTHON_SCRIPT_FILENAME = "corpus_plots.py"
-VIDEOS_CSV_FILENAME = "corpus_videos.csv"
-STATS_CSV_FILENAME = "statistical_tests.csv"
 
 # 模板占位符：{scalars}/{partitions} 为 R 字符向量字面量，{csv_filename}/{stats_filename} 为文件名
 R_SCRIPT_TEMPLATE = '''\
@@ -342,7 +340,7 @@ class CorpusVisualizer:
         self,
         csv_filename: str = VIDEOS_CSV_FILENAME,
         partitions: Optional[List[str]] = None,
-        stats_filename: str = STATS_CSV_FILENAME,
+        stats_filename: str = STATS_TESTS_FILENAME,
     ) -> str:
         scalars = ", ".join(f'"{name}"' for name in SCALAR_FIELDS)
         partition_literal = ", ".join(f'"{self._escape_r_string(name)}"' for name in (partitions or []))
@@ -366,7 +364,7 @@ class CorpusVisualizer:
         self,
         csv_filename: str = VIDEOS_CSV_FILENAME,
         partitions: Optional[List[str]] = None,
-        stats_filename: str = STATS_CSV_FILENAME,
+        stats_filename: str = STATS_TESTS_FILENAME,
     ) -> str:
         scalars = ", ".join(f'"{name}"' for name in SCALAR_FIELDS)
         partition_literal = ", ".join(f'"{name}"' for name in (partitions or []))

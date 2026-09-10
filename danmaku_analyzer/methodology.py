@@ -49,6 +49,7 @@ class MethodologyGenerator:
             "",
             "## 2. 预处理",
             "",
+            "- 文本归一化：弹幕内容统一执行 Unicode NFC 归一、换行统一与控制字符去除，保障分词与硬统计的可复现性（danmaku_raw.csv 存储归一后文本）。",
             "- 用户级去重：按弹幕 CRC32 用户哈希去重，同一用户的重复弹幕仅保留一条。",
         ]
         if settings.SEGMENTATION_MODE == "dynamic":

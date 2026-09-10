@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from .config import get_settings, Settings
 from . import __version__
 from .crawler import BilibiliCrawler, VideoMeta, DanmakuItem
+from .errors import InputParseError
 from .social_variables import SocialVariables
 from .user_deduplicator import UserDeduplicator, DeduplicationResult
 from .timeline_segmenter import TimelineSegmenter, TimeSegment
@@ -34,6 +35,7 @@ from .statistical_validator import StatisticalValidator
 from .cache_manager import get_cache_manager
 from .corpus_builder import CorpusBuilder
 from .corpus_store import CorpusStore
+from .report_schema import STATS_TESTS_FILENAME
 from .utils.input_parser import InputParser, InputType
 from .utils.logger import get_logger
 
@@ -187,7 +189,7 @@ async def _stage_resolve_input(input_str: str, progress: ProgressCallback) -> st
     parser = InputParser()
     parsed = parser.parse(input_str)
     if parsed.input_type == InputType.UNKNOWN:
-        raise ValueError(f"无法解析输入: {input_str}")
+        raise InputParseError(f"无法解析输入: {input_str}")
     bvid = parsed.bvid if parsed.bvid else await parser.resolve_to_bvid(parsed)
     progress("输入解析", f"解析成功: {bvid}")
     return bvid
@@ -675,7 +677,6 @@ class CompareResult:
     snapshot_valid: bool = False
 
 
-STATISTICAL_TESTS_FILENAME = "statistical_tests.csv"
 PROGRESS_RELPATH = os.path.join("scheduler", "progress.jsonl")
 # 进度文件字节上限，超出后轮转为按键去重的最新记录
 _PROGRESS_MAX_BYTES = 512 * 1024
@@ -952,10 +953,10 @@ async def compare_videos(
     if settings.ENABLE_CORPUS_STATISTICS:
         comparison = StatisticalValidator().corpus_compare(build_result.videos_csv_path)
         if comparison.enabled:
-            stats_csv = comparison.to_csv(os.path.join(build_result.output_dir, STATISTICAL_TESTS_FILENAME))
+            stats_csv = comparison.to_csv(os.path.join(build_result.output_dir, STATS_TESTS_FILENAME))
             extra_files.append(stats_csv)
             result.statistics_csv_path = stats_csv
-            progress("语料库聚合", f"推断检验结果已落盘: {STATISTICAL_TESTS_FILENAME}（{len(comparison.rows)} 行，未校正 p 值）")
+            progress("语料库聚合", f"推断检验结果已落盘: {STATS_TESTS_FILENAME}（{len(comparison.rows)} 行，未校正 p 值）")
 
     from .reporter import Reporter
 

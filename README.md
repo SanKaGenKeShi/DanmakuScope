@@ -2,7 +2,7 @@
 
 B 站弹幕社会语言学分析工具（命令行 + 终端图形界面）。采集弹幕及视频元数据，经硬统计与 LLM 软标签双通道分析后，按官方分区（tname）聚合输出交叉统计表，为社会语言学/语料库语言学实证研究提供可溯源、可复核的语料数据。
 
-当前版本：**v0.3.9-beta**
+当前版本：**v0.4.0-beta**
 
 ---
 
@@ -165,7 +165,7 @@ danmaku-tui
 ├── table_emotion.csv                   # 情感分布
 ├── table_interaction_type.csv          # 互动类型分布
 ├── table_consensus_stats.csv           # 共识水平统计
-├── danmaku_raw.csv                     # 全量原始弹幕（未清洗，供语料附录与复核）
+├── danmaku_raw.csv                     # 全量原始弹幕（Unicode NFC 归一，未过滤去重，供语料附录与复核）
 ├── report.html                         # HTML 可视化报告（离线单文件，双击直读）
 ├── heatmap_data.json                   # 热力图数据
 ├── kappa_ready.csv                     # 编码员间一致性复核用
@@ -178,7 +178,7 @@ danmaku-tui
 
 英文版保持契约名供程序回读（语料库聚合/导出消费英文版）；中文版为同名双产出，解压工具对中文名支持异常时不影响英文版完整性。
 
-### 兼容与结果解释（v0.3.9-beta）
+### 兼容与结果解释（v0.4.0-beta）
 
 - **统计分母**：词级指标按总词数、每千字指标按总字符数、弹幕级指标按条数合并；软标签比例按该维度的有效标注权重和计算。CSV 新增分母及有效标注数列，`metadata.json` 以 `statistics_schema_version=2.0` 标记统计契约。
 - **缺失与零频**：有效观测中未出现的类别记为 `0`；缺表或无有效标注分母时保留空值（程序回读为 `NaN`），表示未知，不解释为中性、规范书写或零发生率。软标签描述所选非随机样本，不直接代表整视频总体。
@@ -186,6 +186,7 @@ danmaku-tui
 - **档案保护**：每次视频分析使用独立中间目录，ZIP 经全成员 CRC、必需文件及 BV 号校验后原子归档；打包失败保留源文件，失败分析不会覆盖已有成功 ZIP。`--resume` 与报告复用只接受完整且非失败的档案。
 - **语料库比较**：`CORPUS_ZONE_POLICY=all` 时冷热区分别检验，每项指标按有效唯一视频数检查门槛；单分区冷热区配对检验保留，所有 p 值仍未作多重比较校正。可视化分布图直接使用同包 `corpus_summary.csv`。
 - **旧报告兼容**：旧 ZIP 缺少分母时会告警并使用弹幕数作兼容估计；升级或重新聚合不能自动修正旧统计。需要新口径结果时重新分析源视频（复数分析使用 `--no-reuse`，不同时使用 `--resume`）。Prompt 模板未变，`PROMPT_VERSION` 仍为 `v2.3.0`；Prompt 版本相同不代表新旧统计口径相同。
+- **文本归一化（v0.4.0-beta）**：弹幕内容统一执行 Unicode NFC 归一（含换行统一与控制字符去除），保障分词与硬统计可复现，`danmaku_raw.csv` 存归一后文本；爬虫缓存 schema 升至 v2，升级后旧缓存一次性失效并按新口径重拉。
 
 ---
 
@@ -198,6 +199,7 @@ danmaku_analyzer/
 ├── config.py               # 业务配置中心（pydantic-settings）
 ├── llm_config.py           # LLM 配置中心
 ├── account.py              # B 站二维码登录与凭证管理（三级回退收口）
+├── errors.py               # 异常层次（DanmakuScopeError 基类 + 边界错误）
 ├── partitions.py           # 分区映射单一数据源（TID↔分区名）
 ├── crawler.py              # B 站爬虫（protobuf + XML 兜底）
 ├── social_variables.py     # 社会变量锚定（tname + tags）
@@ -215,6 +217,7 @@ danmaku_analyzer/
 ├── statistical_validator.py # 统计推断（Wilson CI + 语料库级 KW/MWU/Cliff's delta）
 ├── reporter.py             # 报告文件导出
 ├── report_archive.py       # 单视频隔离目录、完整性校验与原子归档
+├── report_schema.py        # 报告表名与指标列单一数据源（文件名/列组/统计列）
 ├── methodology.py          # 方法论描述生成（methodology.md）
 ├── exporter.py             # 多格式导出（LaTeX/APA）
 ├── reproducibility.py      # 可复现 manifest（运行环境快照）
@@ -225,7 +228,7 @@ danmaku_analyzer/
 ├── corpus_visualizer.py    # 可视化脚本模板（R/ggplot2 与 matplotlib/seaborn 双后端）
 ├── scheduler/              # 任务调度子包（asyncio.Queue + 状态持久化，中断无损恢复）
 ├── tui/                    # TUI 子包（Textual：主应用/文案与偏好/设置中心）
-├── utils/                  # 工具子包（日志/解析器/Token 计数）
+├── utils/                  # 工具子包（日志/解析器/Token 计数/文本归一化）
 └── lexicon/                # 自定义词典 + 报告规范
 tests/
 ├── test_statistics.py      # 语料库级推断统计（KW/MWU/Cliff's delta + corpus_compare）

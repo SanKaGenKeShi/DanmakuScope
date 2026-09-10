@@ -15,7 +15,7 @@ import pandas as pd
 from scipy import stats
 
 from .config import get_settings
-from .corpus_builder import SCALAR_FIELDS
+from .report_schema import SCALAR_FIELDS, STATISTICAL_TESTS_COLUMNS, UNCORRECTED_P_NOTE
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -84,14 +84,6 @@ class SignificanceTestResult:
             "alpha": self.alpha,
             "note": self.note,
         }
-
-
-STATISTICAL_TESTS_COLUMNS = [
-    "metric", "test_type", "group1", "group2", "n1", "n2",
-    "statistic", "p_value", "effect_size", "effect_magnitude", "note",
-]
-
-UNCORRECTED_P_NOTE = "未校正 p 值（未实施多重比较校正）"
 
 
 def cohen_kappa(labels_a: List, labels_b: List) -> Optional[float]:

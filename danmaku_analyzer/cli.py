@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .config import get_settings
+from .errors import InputParseError
 from .llm_config import get_llm_settings
 from .prefs import apply_saved_prefs
 from .utils.logger import get_logger, setup_logger
@@ -47,6 +48,9 @@ def analyze(input_str: str, output: Optional[str], credential: Optional[str], fr
     """分析单个视频"""
     try:
         asyncio.run(_analyze_async(input_str, output, credential, freq_based, top_n, no_cache))
+    except InputParseError as e:
+        console.print(f"[red]输入无法解析（支持 BV号/AV号/完整链接）: {e}[/red]")
+        sys.exit(2)
     except Exception as e:
         console.print(f"[red]分析失败: {e}[/red]")
         logger.error(f"分析失败: {e}", exc_info=True)
@@ -313,10 +317,11 @@ def corpus(zip_list: tuple, output: Optional[str], from_index: bool, with_plots:
         comparison = None
         stats_csv = None
         if get_settings().ENABLE_CORPUS_STATISTICS:
+            from .report_schema import STATS_TESTS_FILENAME
             from .statistical_validator import StatisticalValidator
             comparison = StatisticalValidator().corpus_compare(result.videos_csv_path)
             if comparison.enabled:
-                stats_csv = comparison.to_csv(os.path.join(result.output_dir, "statistical_tests.csv"))
+                stats_csv = comparison.to_csv(os.path.join(result.output_dir, STATS_TESTS_FILENAME))
                 extra_files.append(stats_csv)
                 console.print(f"  推断检验: {stats_csv}（{len(comparison.rows)} 行，未校正 p 值）")
 

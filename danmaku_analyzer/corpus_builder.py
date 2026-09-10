@@ -19,37 +19,28 @@ from pydantic import BaseModel, Field, model_validator
 from . import __version__
 from .config import get_settings
 from .corpus_store import CorpusStore
+from .report_schema import (
+    CORPUS_METADATA_FILENAME,
+    CORPUS_SUMMARY_FILENAME,
+    DIFF_FIELDS,
+    DIFF_NUMERIC_TOLERANCE,
+    METADATA_FILENAME,
+    MERGED_RAW_FILENAME,
+    NON_DIST_COLUMNS,
+    RAW_DANMAKU_FILENAME,
+    SCALAR_FIELDS,
+    TABLE_CONSENSUS_STATS,
+    TABLE_EMOTION,
+    TABLE_INTERACTION_TYPE,
+    TABLE_LEXICAL,
+    TABLE_ORTHOGRAPHY,
+    TABLE_SENTENCE_FUNCTION,
+    TABLE_SPECS,
+    VIDEOS_CSV_FILENAME,
+)
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-METADATA_FILENAME = "metadata.json"
-VIDEOS_CSV_FILENAME = "corpus_videos.csv"
-RAW_DANMAKU_FILENAME = "danmaku_raw.csv"
-MERGED_RAW_FILENAME = "danmaku_corpus.csv"
-
-# ZIP 内需回读的表：文件名 → 除 danmaku_count 外的标量列（其余列视为分布占比）
-TABLE_SPECS = {
-    "table_lexical_by_partition.csv": ["avg_word_length", "content_word_density", "punctuation_emoji_rate"],
-    "table_consensus_stats.csv": ["high_consensus_rate", "medium_consensus_rate", "low_consensus_rate", "avg_weight_multiplier"],
-    "table_emotion.csv": ["cooperative_principle_violation_rate"],
-    "table_sentence_function.csv": [],
-    "table_interaction_type.csv": [],
-    "table_orthography.csv": [],
-}
-
-NON_DIST_COLUMNS = {
-    "tname", "zone_type", "danmaku_count", "_source_table",
-    "total_word_count", "total_char_count", "label_weight_sum", "valid_label_count",
-    "llm_record_count", "failed_record_count", "degraded_record_count",
-    "high_consensus_ci_lower", "high_consensus_ci_upper", "high_consensus_ci_status",
-}
-
-SCALAR_FIELDS = [
-    "avg_word_length", "content_word_density", "punctuation_emoji_rate",
-    "high_consensus_rate", "medium_consensus_rate", "low_consensus_rate",
-    "avg_weight_multiplier", "cooperative_principle_violation_rate",
-]
 
 
 class CorpusManifest(BaseModel):
@@ -116,12 +107,6 @@ class CorpusBuildResult:
     merged_raw_csv_path: Optional[str] = None  # 合并弹幕总表（旧版 ZIP 无原始弹幕表时为 None）
     zip_path: Optional[str] = None
     zip_valid: bool = False
-
-
-# diff 数值差异判定容差（浮点回读噪声）
-DIFF_NUMERIC_TOLERANCE = 1e-9
-# 参与变更比对的字段：身份/版本/规模 + 全部标量指标
-DIFF_FIELDS = ("tname", "prompt_version", "danmaku_count") + tuple(SCALAR_FIELDS)
 
 
 @dataclass
@@ -283,7 +268,7 @@ class CorpusBuilder:
             for scalar in TABLE_SPECS.get(filename, []):
                 if scalar not in columns:
                     self._warn(f"表 {filename} 缺少必要指标 {scalar}，保留缺失", issues)
-            if filename in TABLE_SPECS and filename != "table_consensus_stats.csv" and not (columns - set(SCALAR_FIELDS)):
+            if filename in TABLE_SPECS and filename != TABLE_CONSENSUS_STATS and not (columns - set(SCALAR_FIELDS)):
                 self._warn(f"表 {filename} 缺少分布指标，相关分类保留缺失", issues)
             weights_by_column = {}
             for column in sorted(columns):
@@ -357,13 +342,13 @@ class CorpusBuilder:
     def _denominator_column(filename: str, column: str) -> str:
         if column == "punctuation_emoji_rate":
             return "danmaku_count"
-        if filename == "table_lexical_by_partition.csv":
+        if filename == TABLE_LEXICAL:
             return "total_word_count"
-        if filename == "table_consensus_stats.csv":
+        if filename == TABLE_CONSENSUS_STATS:
             return "llm_record_count"
-        if filename == "table_orthography.csv" and column.startswith("hard_"):
+        if filename == TABLE_ORTHOGRAPHY and column.startswith("hard_"):
             return "total_char_count"
-        if filename in {"table_emotion.csv", "table_sentence_function.csv", "table_interaction_type.csv", "table_orthography.csv"}:
+        if filename in {TABLE_EMOTION, TABLE_SENTENCE_FUNCTION, TABLE_INTERACTION_TYPE, TABLE_ORTHOGRAPHY}:
             return "label_weight_sum"
         return "danmaku_count"
 
@@ -410,7 +395,7 @@ class CorpusBuilder:
         filepath = self._write_summary_table(rows, summaries, out_dir)
 
         # 视频级观测表：KW/Dunn 等检验的原始观测来源（组级 mean/std 无法还原个体值）
-        videos_path = os.path.join(out_dir, "corpus_videos.csv")
+        videos_path = os.path.join(out_dir, VIDEOS_CSV_FILENAME)
         self._write_video_observations(summaries, videos_path)
         return CorpusBuildResult(
             csv_path=filepath,
@@ -450,7 +435,7 @@ class CorpusBuilder:
         return rows, warnings
 
     def _write_summary_table(self, rows: List[Dict], summaries: List[VideoSummary], out_dir: str) -> str:
-        filepath = os.path.join(out_dir, "corpus_summary.csv")
+        filepath = os.path.join(out_dir, CORPUS_SUMMARY_FILENAME)
         pd.DataFrame(rows).to_csv(filepath, index=False, encoding='utf-8-sig')
         logger.info(f"语料库聚合表已保存: {filepath}（{len(rows)} 组，{len(summaries)} 个视频观测）")
         return filepath
@@ -469,7 +454,7 @@ class CorpusBuilder:
         meta = self.build_snapshot_metadata(result)
         # schema 校验失败直接抛错（不静默通过），由调用方呈现打包失败
         CorpusManifest.model_validate(meta)
-        meta_path = os.path.join(out_dir, "corpus_metadata.json")
+        meta_path = os.path.join(out_dir, CORPUS_METADATA_FILENAME)
         with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 

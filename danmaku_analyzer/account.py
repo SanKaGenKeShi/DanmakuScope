@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlparse
 import httpx
 
 from .config import get_settings
+from .errors import DanmakuScopeError
 from .utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -42,7 +43,7 @@ DEFAULT_HEADERS = {
 }
 
 
-class QrLoginError(Exception):
+class QrLoginError(DanmakuScopeError):
     """二维码登录失败"""
 
 

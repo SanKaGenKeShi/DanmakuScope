@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "danmaku-analyzer"
-version = "0.3.9-beta"
+version = "0.4.0-beta"
 description = "DanmakuScope - B站弹幕社会语言学分析工具"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -70,6 +70,7 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short --strict-markers"
+cache_dir = ".scratch/pytest-cache"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",

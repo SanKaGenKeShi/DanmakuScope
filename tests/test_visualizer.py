@@ -8,14 +8,12 @@ import pandas as pd
 import pytest
 
 from danmaku_analyzer.config import get_settings
-from danmaku_analyzer.corpus_builder import SCALAR_FIELDS
 from danmaku_analyzer.corpus_visualizer import (
     PYTHON_SCRIPT_FILENAME,
-    STATS_CSV_FILENAME,
     CorpusVisualizer,
     R_SCRIPT_FILENAME,
 )
-from danmaku_analyzer.statistical_validator import STATISTICAL_TESTS_COLUMNS
+from danmaku_analyzer.report_schema import SCALAR_FIELDS, STATISTICAL_TESTS_COLUMNS, STATS_TESTS_FILENAME
 
 
 @pytest.fixture
@@ -36,7 +34,7 @@ class TestRenderRScript:
     def test_default_filenames_embedded(self, visualizer):
         script = visualizer.render_r_script()
         assert '"corpus_videos.csv"' in script
-        assert f'"{STATS_CSV_FILENAME}"' in script
+        assert f'"{STATS_TESTS_FILENAME}"' in script
 
     def test_custom_csv_filename_embedded(self, visualizer):
         script = visualizer.render_r_script(csv_filename="my_obs.csv")
@@ -153,7 +151,7 @@ class TestRenderPythonScript:
     def test_default_filenames_and_scalars_embedded(self, visualizer):
         script = visualizer.render_python_script()
         assert '"corpus_videos.csv"' in script
-        assert f'"{STATS_CSV_FILENAME}"' in script
+        assert f'"{STATS_TESTS_FILENAME}"' in script
         for name in SCALAR_FIELDS:
             assert f'"{name}"' in script
 
